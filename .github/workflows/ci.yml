@@ -52,18 +52,18 @@ jobs:
 
       # Start from .env.example (FAKE admin hash, email and cron secret), then point the three
       # Supabase variables at the local stack. `supabase status -o env` prints API_URL, ANON_KEY
-      # and SERVICE_ROLE_KEY. tests/global-setup.ts and vitest.config.ts read .env.local.
-      - name: Write .env.local from the local stack
+      # and SERVICE_ROLE_KEY. tests/global-setup.ts reads .env.test.local (never .env.local) and refuses a non-local URL.
+      - name: Write .env.test.local from the local stack
         run: |
           set -euo pipefail
           supabase status -o env > status.env
           get() { grep -E "^$1=" status.env | head -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'; }
-          grep -vE '^(SUPABASE_URL|SUPABASE_ANON_KEY|SUPABASE_SERVICE_ROLE_KEY)=' .env.example > .env.local
+          grep -vE '^(SUPABASE_URL|SUPABASE_ANON_KEY|SUPABASE_SERVICE_ROLE_KEY)=' .env.example > .env.test.local
           {
             echo "SUPABASE_URL=$(get API_URL)"
             echo "SUPABASE_ANON_KEY=$(get ANON_KEY)"
             echo "SUPABASE_SERVICE_ROLE_KEY=$(get SERVICE_ROLE_KEY)"
-          } >> .env.local
+          } >> .env.test.local
           rm -f status.env
 
       - name: Test

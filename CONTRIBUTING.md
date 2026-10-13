@@ -22,7 +22,7 @@ npm test                       # vitest
 npm run typecheck              # tsc --noEmit
 ```
 
-The tests run against the local Supabase stack, so `supabase start` must be running and `.env.local` must point at it. Never point tests at a hosted project. Each run writes rows under its own `test-<runId>-` prefix and removes them afterwards.
+The tests run against the local Supabase stack, so `supabase start` must be running. URL and keys are read from `supabase status` (or from a git-ignored `.env.test.local`); `.env.local` is never used by the tests. A `SUPABASE_URL` that is not `127.0.0.1`, `localhost` or `::1` is refused before any request is made, unless you set `AGENCY_BOARD_TEST_ALLOW_REMOTE=1` for a disposable hosted project. Never point tests at a project that holds real data. Each run writes rows under its own `test-<runId>-` prefix and removes them afterwards.
 
 If you change a migration, restart with `supabase db reset` and re-run the full suite. Migrations are edited in place at v0.1; say so in the PR.
 

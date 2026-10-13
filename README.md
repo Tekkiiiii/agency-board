@@ -78,9 +78,11 @@ Local ports are in `supabase/config.toml` (API 13321, database 13322, Studio 133
 Tests run against the local Supabase stack, so keep it running:
 
 ```sh
-npm test                            # vitest; needs `supabase start` and .env.local
+npm test                            # vitest; needs `supabase start` (see the note below)
 npm run typecheck
 ```
+
+By default the tests target the local stack: URL and keys come from `supabase status` (or from a git-ignored `.env.test.local`). `.env.local` is never used by the tests. A `SUPABASE_URL` that is not `127.0.0.1`, `localhost` or `::1` is refused before any request is made. To deliberately test a disposable hosted project, set `AGENCY_BOARD_TEST_ALLOW_REMOTE=1`.
 
 Tests create rows under their own `test-<runId>-` prefix and sweep them afterwards.
 
@@ -148,7 +150,7 @@ Short version; the full threat model is in [SECURITY.md](SECURITY.md). Tokens id
 
 ```sh
 npm run typecheck                   # tsc --noEmit
-npm test                            # vitest run; 26 test files, needs `supabase start` and .env.local
+npm test                            # vitest run; 26 test files, needs `supabase start`
 ```
 
 The suite is integration-style: it talks to the local Supabase stack (never a hosted project). Every row a test creates carries a `test-<runId>-` prefix and is swept afterwards. Tests that need the embedding function or PowerShell skip themselves when it is not available (the local stack without the edge runtime has no `embed`; `pwsh` is optional).

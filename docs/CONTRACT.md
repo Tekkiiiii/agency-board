@@ -507,7 +507,7 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
 | T2 Server | `lib/handlers.ts`, `lib/schemas.ts`, `lib/mcp.ts`, `lib/links.ts`, `app/api/mcp/route.ts`, `app/api/v1/[...path]/route.ts`, `app/api/admin/[...path]/route.ts`, `app/api/health/route.ts`, `app/layout.tsx`, `app/page.tsx` |
 | T3 Security | `lib/auth.ts`, `lib/scopes.ts`, `lib/guard.ts`, `lib/request.ts`, `lib/flags.ts`, `lib/access.ts` |
 | T4 Connect | `lib/devices.ts`, `lib/scripts/connectSh.ts`, `lib/scripts/connectPs1.ts`, `app/connect.sh/route.ts`, `app/connect.ps1/route.ts`, `app/api/connect/exchange/route.ts`, `scripts/admin.mjs`, `docs/connect.md` |
-| T5 Tests | `tests/**` (vitest; unit tests for pure fns; integration tests against a LOCAL Supabase using `.env.local` — every row created uses namespace prefix `shared/test-<runid>`, `hermes/test-<runid>` etc. or machine name `test-<runid>-*`, and is deleted in `afterAll`) |
+| T5 Tests | `tests/**` (vitest; unit tests for pure fns; integration tests against a LOCAL Supabase stack (`tests/global-setup.ts` reads `supabase status` or a git-ignored `.env.test.local`, never `.env.local`, and `tests/db-guard.ts` refuses any non-local `SUPABASE_URL` unless `AGENCY_BOARD_TEST_ALLOW_REMOTE=1`) — every row created uses namespace prefix `shared/test-<runid>`, `hermes/test-<runid>` etc. or machine name `test-<runid>-*`, and is deleted in `afterAll`) |
 
 The tracks ran in parallel after T0 landed, each coding against the section 5 signatures.
 
