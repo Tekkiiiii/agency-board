@@ -1,0 +1,56 @@
+name: db-backup
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # daily at 19:00 UTC (GitHub cron is always UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install postgresql-client-17 (PGDG)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
+
+      - name: Dump + encrypt
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$SUPABASE_DB_URL" || { echo "::error::SUPABASE_DB_URL secret missing"; exit 1; }
+          test -n "$BACKUP_PASSPHRASE" || { echo "::error::BACKUP_PASSPHRASE secret missing"; exit 1; }
+          echo "STAMP=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+          /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_DB_URL" --no-owner --no-privileges -n public -Fc \
+            | gpg --batch --yes --symmetric --cipher-algo AES256 --pinentry-mode loopback \
+                --passphrase-fd 3 3<<<"$BACKUP_PASSPHRASE" -o backup.dump.gpg
+          # Fail loudly on an empty/truncated dump: decrypt and require a parseable TOC with tables.
+          gpg --batch --quiet --decrypt --pinentry-mode loopback --passphrase-fd 3 3<<<"$BACKUP_PASSPHRASE" backup.dump.gpg > check.dump
+          test -s check.dump || { echo "::error::dump is empty"; exit 1; }
+          TABLES=$(/usr/lib/postgresql/17/bin/pg_restore -l check.dump | grep -c ' TABLE public ' || true)
+          rm -f check.dump
+          test "$TABLES" -gt 0 || { echo "::error::dump contains no public tables"; exit 1; }
+          echo "tables=$TABLES size=$(stat -c %s backup.dump.gpg) bytes"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ env.STAMP }}
+          path: backup.dump.gpg
+          retention-days: 30
+          if-no-files-found: error

@@ -1,0 +1,10 @@
+{
+  "name": "A,B,A within 10 min -> red concurrent_use",
+  "known": { "countries": ["VN"], "networks": ["asn:7552", "asn:45899"] },
+  "recent": [
+    { "at": "2026-10-07T10:00:00Z", "country": "VN", "network": "asn:7552" },
+    { "at": "2026-10-07T10:03:00Z", "country": "VN", "network": "asn:45899" }
+  ],
+  "cur": { "at": "2026-10-07T10:06:00Z", "country": "VN", "network": "asn:7552" },
+  "expect": [{ "rule": "concurrent_use", "severity": "red", "value": "asn:45899,asn:7552" }]
+}

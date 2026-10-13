@@ -1,0 +1,7 @@
+{
+  "name": "new country -> red new_country only",
+  "known": { "countries": ["VN"], "networks": ["asn:7552"] },
+  "recent": [],
+  "cur": { "at": "2026-10-07T10:00:00Z", "country": "SG", "network": "asn:7552" },
+  "expect": [{ "rule": "new_country", "severity": "red", "value": "SG" }]
+}

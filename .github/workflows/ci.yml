@@ -1,0 +1,74 @@
+# CI: typecheck, production build, then the full test suite against a local Supabase stack.
+# NOTE: this workflow has not been run yet. Treat it as untested until the first push
+# and fix any version or timing issue it shows.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # The build needs the variable names to exist. The values are FAKE placeholders from .env.example.
+      - name: Build (dummy env)
+        run: |
+          cp .env.example .env.local
+          npx next build
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start local Supabase
+        run: supabase start -x vector
+
+      - name: Apply migrations and seed
+        run: supabase db reset
+
+      # Start from .env.example (FAKE admin hash, email and cron secret), then point the three
+      # Supabase variables at the local stack. `supabase status -o env` prints API_URL, ANON_KEY
+      # and SERVICE_ROLE_KEY. tests/global-setup.ts and vitest.config.ts read .env.local.
+      - name: Write .env.local from the local stack
+        run: |
+          set -euo pipefail
+          supabase status -o env > status.env
+          get() { grep -E "^$1=" status.env | head -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'; }
+          grep -vE '^(SUPABASE_URL|SUPABASE_ANON_KEY|SUPABASE_SERVICE_ROLE_KEY)=' .env.example > .env.local
+          {
+            echo "SUPABASE_URL=$(get API_URL)"
+            echo "SUPABASE_ANON_KEY=$(get ANON_KEY)"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$(get SERVICE_ROLE_KEY)"
+          } >> .env.local
+          rm -f status.env
+
+      - name: Test
+        run: npm test
+
+      - name: Stop Supabase
+        if: always()
+        run: supabase stop --no-backup

@@ -1,0 +1,18 @@
+# secrets / local links
+.env*
+!.env.example
+.vercel/
+supabase/.temp/
+supabase/.branches/
+# build
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+# local agent settings
+.claude/
+# misc
+.DS_Store
+*.bak-agency-board-*
+backup-*.sql*

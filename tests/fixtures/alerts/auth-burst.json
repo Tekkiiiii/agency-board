@@ -1,0 +1,7 @@
+[
+  { "name": "10 global failures -> red global", "global": 10, "ipFailures": 1, "ip": "198.51.100.7",
+    "expect": { "rule": "auth_burst", "severity": "red", "value": "global" } },
+  { "name": "5 from one ip -> red ip", "global": 5, "ipFailures": 5, "ip": "198.51.100.7",
+    "expect": { "rule": "auth_burst", "severity": "red", "value": "198.51.100.7" } },
+  { "name": "4 -> none", "global": 4, "ipFailures": 4, "ip": "198.51.100.7", "expect": null }
+]

@@ -1,0 +1,10 @@
+{
+  "name": "A,A,B (single switch, B unknown) -> yellow new_network only",
+  "known": { "countries": ["VN"], "networks": ["asn:7552"] },
+  "recent": [
+    { "at": "2026-10-07T10:00:00Z", "country": "VN", "network": "asn:7552" },
+    { "at": "2026-10-07T10:02:00Z", "country": "VN", "network": "asn:7552" }
+  ],
+  "cur": { "at": "2026-10-07T10:04:00Z", "country": "VN", "network": "asn:45899" },
+  "expect": [{ "rule": "new_network", "severity": "yellow", "value": "asn:45899" }]
+}

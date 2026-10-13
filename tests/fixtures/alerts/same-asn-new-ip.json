@@ -1,0 +1,7 @@
+{
+  "name": "new IP, same ASN -> no alerts",
+  "known": { "countries": ["VN"], "networks": ["asn:7552"] },
+  "recent": [{ "at": "2026-10-07T10:00:00Z", "country": "VN", "network": "asn:7552" }],
+  "cur": { "at": "2026-10-07T10:05:00Z", "country": "VN", "network": "asn:7552" },
+  "expect": []
+}

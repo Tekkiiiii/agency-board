@@ -1,0 +1,112 @@
+/* /dashboard/approvals — page-local styles. Tokens only (dashboard.css :root). Scoped under .hub-root. */
+
+.hub-root .ap-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.hub-root .ap-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hub-root .ap-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
+  gap: 16px 32px;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+.hub-root .ap-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.hub-root .ap-item:last-child {
+  padding-bottom: 0;
+}
+.hub-root .ap-item__head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.hub-root .ap-question {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 70ch;
+}
+.hub-root .ap-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 14px;
+  color: var(--grey);
+}
+.hub-root .ap-meta .hub-mono {
+  color: var(--ink);
+}
+.hub-root .ap-task {
+  overflow-wrap: anywhere;
+}
+
+.hub-root .ap-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.hub-root .ap-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hub-root .ap-options__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hub-root .ap-option {
+  white-space: normal;
+  text-align: left;
+}
+.hub-root .ap-option.is-on {
+  border-color: var(--blue);
+  background: var(--blue-wash);
+  color: var(--blue) !important;
+}
+.hub-root .ap-answer {
+  resize: vertical;
+  min-height: 64px;
+}
+.hub-root .ap-form__actions {
+  display: flex;
+  gap: 8px;
+}
+.hub-root .ap-form__actions .hub-btn {
+  min-width: 112px;
+}
+
+.hub-root .ap-clip {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  max-width: 48ch;
+}
+.hub-root .ap-empty {
+  padding: 0 24px 24px;
+}
+
+
+@media (max-width: 1099px) {
+  .hub-root .ap-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

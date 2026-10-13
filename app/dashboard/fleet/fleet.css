@@ -1,0 +1,56 @@
+/* /dashboard/fleet (B-OVERVIEW). Tokens only; scoped under .hub-root. */
+
+.hub-root .fl-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.hub-root .fl-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.hub-root .fl-small {
+  font-size: 12px;
+}
+.hub-root .fl-clip {
+  display: inline-block;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.hub-root .fl-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.hub-root .fl-scope p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.hub-root .fl-scope__k {
+  display: inline-block;
+  min-width: 48px;
+  color: var(--grey);
+}
+.hub-root .fl-row--revoked th,
+.hub-root .fl-row--revoked td {
+  color: var(--grey);
+}
+
+/* card-head meta never breaks mid-phrase ("1 online · 2 offline", "Manage devices and roles") */
+.hub-root .fl-card .hub-card__head {
+  flex-wrap: wrap;
+}
+.hub-root .fl-card .hub-card__subtitle,
+.hub-root .fl-card .hub-card__actions {
+  white-space: nowrap;
+}

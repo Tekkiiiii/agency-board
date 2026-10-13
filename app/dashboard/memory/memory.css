@@ -1,0 +1,355 @@
+/* /dashboard/memory — page-local styles. Tokens only (dashboard.css :root); 8-pt grid. */
+
+/* ---------- tabs ---------- */
+.hub-root .mem-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  margin-top: -8px;
+}
+.hub-root .mem-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 16px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--grey);
+  font-weight: 600;
+  text-decoration: none;
+}
+.hub-root .mem-tab:hover {
+  color: var(--ink);
+}
+.hub-root .mem-tab[aria-current="page"] {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+/* ---------- search ---------- */
+.hub-root .mem-search {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 16px 24px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.hub-root .mem-search__buttons {
+  display: flex;
+  gap: 8px;
+}
+.hub-root .mem-search__err {
+  grid-column: 1 / -1;
+}
+
+/* ---------- result rows ---------- */
+.hub-root .mem-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.hub-root .mem-slug {
+  font-weight: 700;
+  color: var(--ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.hub-root .mem-slug:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+.hub-root .mem-preview {
+  color: var(--grey);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hub-root .mem-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.hub-root .mem-times {
+  font-size: 14px;
+}
+.hub-root .mem-markers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.hub-root .mem-row--flagged > :first-child {
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+.hub-root .mem-empty-pad {
+  padding: 8px 24px 24px;
+}
+
+/* ---------- detail ---------- */
+.hub-root .mem-back {
+  align-self: flex-start;
+  font-weight: 600;
+  text-decoration: none;
+  margin-bottom: -8px;
+}
+.hub-root .mem-back:hover {
+  text-decoration: underline;
+}
+.hub-root .mem-detail__slug {
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.hub-root .mem-detail__sub {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.hub-root .mem-content {
+  margin: 16px 0 0;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui), system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow: auto;
+}
+.hub-root .mem-content--inbox {
+  max-height: 320px;
+  margin-top: 12px;
+}
+.hub-root .mem-editbox {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+.hub-root .mem-editbox__summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--blue);
+  width: fit-content;
+}
+.hub-root .mem-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+.hub-root .mem-edit__text {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: vertical;
+  min-height: 200px;
+}
+.hub-root .mem-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.hub-root .mem-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hub-root .mem-result {
+  font-size: 14px;
+  margin: 0;
+}
+.hub-root .mem-result:empty {
+  display: none;
+}
+.hub-root .mem-result--ok {
+  color: var(--ok);
+}
+.hub-root .mem-result--err {
+  color: var(--danger);
+}
+.hub-root .mem-full-time {
+  font-size: 12px;
+}
+
+.hub-root .mem-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 24px;
+  align-items: start;
+}
+.hub-root .mem-prov {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hub-root .mem-prov__row {
+  display: grid;
+  grid-template-columns: 136px minmax(0, 1fr);
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.hub-root .mem-prov__row:last-child {
+  border-bottom: 0;
+}
+.hub-root .mem-prov dt {
+  color: var(--grey);
+}
+.hub-root .mem-prov dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- links ---------- */
+.hub-root .mem-linkgroups {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.hub-root .mem-linkgroup__title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.hub-root .mem-linkgroup__side + .mem-linkgroup__side {
+  margin-top: 12px;
+}
+.hub-root .mem-linkgroup__dir {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--grey);
+}
+.hub-root .mem-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.hub-root .mem-link {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.hub-root .mem-link:last-child {
+  border-bottom: 0;
+}
+.hub-root .mem-link__target {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.hub-root .mem-link__slug {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.hub-root .mem-link__ns {
+  font-size: 13px;
+}
+.hub-root .mem-link__meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- inbox ---------- */
+.hub-root .mem-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.hub-root .mem-inbox__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.hub-root .mem-inbox__warn {
+  margin-top: 12px !important;
+  font-size: 14px;
+}
+.hub-root .mem-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin-top: 16px;
+}
+.hub-root .mem-review__approve {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex: 1 1 360px;
+  min-width: 0;
+}
+.hub-root .mem-review__field {
+  flex: 1;
+  min-width: 0;
+}
+.hub-root .mem-review .mem-result {
+  flex-basis: 100%;
+}
+
+/* .hub-input sets font: inherit after .hub-mono; restore mono for namespace inputs. */
+.hub-root .mem-mono-input {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 15px;
+}
+
+/* ---------- narrow ---------- */
+@media (max-width: 1199px) {
+  .hub-root .mem-search {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .hub-root .mem-search__q {
+    grid-column: 1 / -1;
+  }
+  .hub-root .mem-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 599px) {
+  .hub-root .mem-search {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+  .hub-root .mem-prov__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+  .hub-root .mem-link {
+    flex-wrap: wrap;
+  }
+  .hub-root .mem-review__approve {
+    flex-wrap: wrap;
+  }
+  .hub-root .mem-review__field {
+    flex-basis: 100%;
+  }
+}

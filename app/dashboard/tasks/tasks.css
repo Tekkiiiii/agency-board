@@ -1,0 +1,363 @@
+/* /dashboard/tasks — page-local styles. Tokens only (dashboard.css :root). Scoped under .hub-root. */
+
+.hub-root .tb-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.hub-root .tb-summary {
+  color: var(--grey);
+  font-size: 15px;
+}
+.hub-root .tb-summary strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.hub-root .tb-summary .tb-summary__warn {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+}
+
+/* layout: board + optional detail panel */
+.hub-root .tb-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.hub-root .tb-layout--with-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+}
+.hub-root .tb-layout--with-panel .tb-panel {
+  order: 2;
+}
+/* wide screens with the panel open: the board folds into two columns so nothing scrolls sideways */
+@media (min-width: 1200px) {
+  .hub-root .tb-layout--with-panel .tb-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+}
+
+/* board */
+.hub-root .tb-board {
+  display: grid;
+  grid-template-columns: repeat(var(--tb-cols, 4), minmax(200px, 1fr));
+  gap: 16px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  align-items: start;
+}
+.hub-root .tb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px 12px 12px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.hub-root .tb-col__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 4px;
+}
+.hub-root .tb-col__title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.hub-root .tb-col__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--grey);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.hub-root .tb-col--failed[data-nonzero] .tb-col__title {
+  color: var(--danger);
+}
+.hub-root .tb-col__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hub-root .tb-col__empty,
+.hub-root .tb-col__more {
+  padding: 8px 4px;
+  color: var(--grey);
+  font-size: 14px;
+}
+
+/* card */
+.hub-root .tb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+.hub-root .tb-card:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.hub-root .tb-card.is-selected {
+  border-color: var(--blue);
+  box-shadow: inset 3px 0 0 var(--blue);
+  background: var(--blue-wash);
+}
+.hub-root .tb-card--expired {
+  border-color: var(--line-strong);
+}
+.hub-root .tb-card__title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.hub-root .tb-card__ns {
+  color: var(--grey);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.hub-root .tb-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.hub-root .tb-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 4px;
+  font-size: 13px;
+}
+.hub-root .tb-card__meta .hub-mono {
+  overflow-wrap: anywhere;
+}
+.hub-root .tb-card__k {
+  color: var(--grey);
+}
+.hub-root .tb-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--grey);
+}
+
+/* lease countdown */
+.hub-root .tb-lease {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.hub-root .tb-lease__label {
+  color: var(--grey);
+}
+
+/* detail panel */
+.hub-root .tb-panel__card .hub-card__title {
+  overflow-wrap: anywhere;
+}
+.hub-root .tb-panel__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.hub-root .tb-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+.hub-root .tb-field {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.hub-root .tb-field dt {
+  color: var(--grey);
+}
+.hub-root .tb-field dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.hub-root .tb-h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.hub-root .tb-section,
+.hub-root .tb-body {
+  margin-top: 24px;
+}
+.hub-root .tb-body__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  margin-bottom: 4px !important;
+}
+
+/* actions */
+.hub-root .tb-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.hub-root .tb-reassign__row {
+  display: flex;
+  gap: 8px;
+}
+.hub-root .tb-reassign__row .hub-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+.hub-root .tb-actions__row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hub-root .tb-dialog-title {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* history timeline */
+.hub-root .tb-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hub-root .tb-event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  padding-bottom: 12px;
+}
+.hub-root .tb-event::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 14px;
+  bottom: 0;
+  width: 2px;
+  background: var(--line);
+}
+.hub-root .tb-event:last-child::before {
+  display: none;
+}
+.hub-root .tb-event__dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--white);
+  border: 2px solid var(--grey-l);
+}
+.hub-root .tb-event--handoff .tb-event__dot {
+  border-color: var(--blue);
+}
+.hub-root .tb-event--done .tb-event__dot,
+.hub-root .tb-event--claimed .tb-event__dot {
+  border-color: var(--ok);
+}
+.hub-root .tb-event--failed .tb-event__dot {
+  border-color: var(--danger);
+}
+.hub-root .tb-event__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 14px;
+}
+.hub-root .tb-event__kind {
+  font-weight: 700;
+}
+.hub-root .tb-event__line .hub-time {
+  color: var(--grey);
+  font-size: 13px;
+}
+.hub-root .tb-event__note {
+  margin-top: 2px !important;
+  font-size: 14px;
+  color: var(--grey);
+  overflow-wrap: anywhere;
+}
+
+/* narrower desktops: panel stacks above the board */
+@media (max-width: 1199px) {
+  .hub-root .tb-layout--with-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hub-root .tb-layout--with-panel .tb-panel {
+    order: 0;
+  }
+}
+@media (max-width: 899px) {
+  .hub-root .tb-board {
+    grid-template-columns: repeat(var(--tb-cols, 4), minmax(260px, 82vw));
+    scroll-snap-type: x mandatory;
+    margin: 0 -16px;
+    padding: 0 16px 8px;
+  }
+  .hub-root .tb-col {
+    scroll-snap-align: start;
+  }
+  .hub-root .tb-field {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+}
+
+
+/* Unclaimed-task flag: open + handed off + waiting over STALE_TASK_MIN_MINUTES (notify only). */
+.hub-root .tb-stale {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.4rem;
+  color: var(--ink);
+}

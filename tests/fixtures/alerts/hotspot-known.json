@@ -1,0 +1,7 @@
+{
+  "name": "hotspot switch to a known network -> no alerts",
+  "known": { "countries": ["VN"], "networks": ["asn:7552", "asn:131445"] },
+  "recent": [{ "at": "2026-10-07T10:00:00Z", "country": "VN", "network": "asn:7552" }],
+  "cur": { "at": "2026-10-07T10:01:00Z", "country": "VN", "network": "asn:131445" },
+  "expect": []
+}

@@ -1,0 +1,333 @@
+/* /dashboard/devices — page-local styles. Tokens only (dashboard.css :root). Prefix: dv-. */
+
+.hub-root .dv-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: baseline;
+}
+.hub-root .dv-banner__close {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.hub-root .dv-title-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- alerts ---------- */
+.hub-root .dv-alerts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.hub-root .dv-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  padding: 16px 16px 16px 20px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--white);
+}
+.hub-root .dv-alert--red {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--white));
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+}
+.hub-root .dv-alert--yellow {
+  border-color: var(--line);
+  border-left-color: var(--ink);
+  background: var(--white);
+}
+.hub-root .dv-alert__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.hub-root .dv-alert__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hub-root .dv-alert__text {
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.hub-root .dv-alert__meta {
+  font-size: 13px;
+  color: var(--grey);
+}
+.hub-root .dv-alert__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---------- devices table ---------- */
+.hub-root .dv-machine,
+.hub-root .dv-where {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-root .dv-machine__name {
+  font-weight: 700;
+  white-space: nowrap;
+}
+.hub-root .dv-where .hub-mono,
+.hub-root .dv-ident .hub-mono {
+  white-space: nowrap;
+}
+.hub-root .dv-machine__agents,
+.hub-root .dv-where__geo {
+  font-size: 13px;
+  color: var(--grey);
+}
+.hub-root .dv-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.hub-root .dv-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.hub-root .dv-more {
+  font-size: 12px;
+}
+.hub-root .dv-row-actions {
+  display: inline-flex;
+  gap: 8px;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+.hub-root .dv-row--revoked th,
+.hub-root .dv-row--revoked td {
+  color: var(--grey);
+}
+
+/* ---------- connect code ---------- */
+.hub-root .dv-add {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.hub-root .dv-add__form {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.4fr) minmax(140px, 0.8fr) minmax(220px, 1.2fr) auto;
+  gap: 16px 24px;
+  align-items: start;
+}
+.hub-root .dv-add__submit {
+  padding-top: 29px; /* aligns with inputs below their labels */
+}
+.hub-root .dv-agents {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+.hub-root .dv-agents legend {
+  padding: 0;
+  margin-bottom: 8px;
+  float: left;
+  width: 100%;
+}
+.hub-root .dv-agents .hub-hint {
+  width: 100%;
+}
+.hub-root .dv-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  cursor: pointer;
+}
+.hub-root .dv-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--blue);
+}
+.hub-root .dv-check--off {
+  color: var(--grey-l);
+  cursor: not-allowed;
+}
+.hub-root .dv-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.hub-root .dv-connect__top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px 24px;
+}
+.hub-root .dv-connect__label {
+  font-size: 13px;
+  color: var(--grey);
+}
+.hub-root .dv-connect__code {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.hub-root .dv-connect__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.hub-root .dv-expired {
+  color: var(--danger);
+  font-weight: 600;
+}
+.hub-root .dv-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hub-root .dv-cmd__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.hub-root .dv-cmd__label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.hub-root .dv-cmd__code {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--white);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- identities ---------- */
+.hub-root .dv-ident {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.hub-root .dv-seen {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-root .dv-seen__note {
+  font-size: 12px;
+  color: var(--grey);
+}
+.hub-root .dv-ident__off {
+  font-size: 12px;
+  color: var(--danger);
+}
+.hub-root .dv-role {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.hub-root .dv-role__select {
+  width: auto;
+  min-height: 34px;
+  padding: 4px 8px;
+  font-size: 14px;
+}
+.hub-root .dv-role__default {
+  font-size: 12px;
+  color: var(--grey);
+  font-style: italic;
+}
+.hub-root .dv-role__status {
+  font-size: 12px;
+  color: var(--grey);
+}
+.hub-root .dv-role__err {
+  color: var(--danger);
+}
+
+/* ---------- dialogs ---------- */
+.hub-root .dv-dialog--wide,
+.dv-dialog--wide {
+  width: min(640px, calc(100vw - 32px));
+}
+.hub-root .dv-dialog__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.hub-root .dv-dialog__stack p {
+  color: var(--ink);
+}
+.hub-root .dv-strong {
+  font-weight: 700;
+}
+
+@media (max-width: 1099px) {
+  .hub-root .dv-add__form {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .hub-root .dv-add__submit {
+    padding-top: 0;
+  }
+}
+@media (max-width: 899px) {
+  /* scrolling devices/identities tables: keep cells on one line so rows stay scannable */
+  .hub-root .dv-tablecard .hub-table td,
+  .hub-root .dv-tablecard .hub-table tbody th {
+    white-space: nowrap;
+  }
+  .hub-root .dv-alert {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .hub-root .dv-add__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* under 600px the tables stack into cards (DataTable stack): wrap again, keep the action buttons together */
+@media (max-width: 599px) {
+  .hub-root .dv-tablecard .hub-table td,
+  .hub-root .dv-tablecard .hub-table tbody th {
+    white-space: normal;
+  }
+  .hub-root .dv-tablecard .dv-row-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .hub-root .dv-tablecard .dv-row-actions .hub-btn {
+    min-height: 40px;
+  }
+}
