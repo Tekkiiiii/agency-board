@@ -18,10 +18,12 @@ import {
   MACHINE_NAME_RE,
   markAllAlertsRead,
   needsRestrictedWarning,
+  parseListenForm,
   type DeviceOs,
 } from "../../../lib/dash/devices";
 import { logAdminAction } from "../../../lib/dash/log";
 import { requireAdmin } from "../../../lib/dash/session";
+import { setListenMinutes } from "../../../lib/agentSettings";
 import { issueConnectCode, revokeDevice, rotateDevice } from "../../../lib/devices";
 import { listIdentities, setRole } from "../../../lib/roles";
 import { tierHit, tierReadable } from "../../../lib/guard";
@@ -286,5 +288,32 @@ export async function setRoleAction(_prev: ActionState, fd: FormData): Promise<A
     logErr("role_set", e);
     await logAdminAction("role_set", statusOf(e));
     return { ok: false, error: userMessage(e) };
+  }
+}
+
+// ---------- listen/wait interval (slider) ----------
+
+// Fixed texts: nothing from the request is echoed back.
+const LISTEN_INVALID = "Invalid interval.";
+const LISTEN_SAVE_FAILED =
+  "Could not save the interval. If migration 20261013000007 has not been applied yet, saving stays unavailable; the error code is in the server log.";
+
+// agent@machine listen/wait check interval, 0..60 minutes, 0 = off. Validated again here: the client range input is a convenience only.
+export async function setListenMinutesAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const p = parseListenForm(fd);
+  if (!p) {
+    await logAdminAction("listen_minutes_set", 422);
+    return { ok: false, error: LISTEN_INVALID };
+  }
+  try {
+    const saved = await setListenMinutes(p.agent, p.device_id, p.minutes);
+    await logAdminAction("listen_minutes_set", 200);
+    revalidatePath(PATH);
+    return { ok: true, message: saved === 0 ? "Saved: off." : `Saved: ${saved} min.` };
+  } catch (e) {
+    logErr("listen_minutes_set", e);
+    await logAdminAction("listen_minutes_set", statusOf(e));
+    return { ok: false, error: LISTEN_SAVE_FAILED };
   }
 }

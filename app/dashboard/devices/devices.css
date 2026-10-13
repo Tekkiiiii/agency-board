@@ -277,6 +277,53 @@
   color: var(--danger);
 }
 
+/* ---------- listen / wait slider ---------- */
+.hub-root .dv-listen {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.hub-root .dv-listen__range {
+  width: 150px;
+  min-height: 34px; /* touch target height; the track itself stays thin */
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+.hub-root .dv-listen__range:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.hub-root .dv-listen__range[aria-busy="true"] {
+  opacity: 0.7;
+}
+.hub-root .dv-listen__value {
+  min-width: 52px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.hub-root .dv-listen__value--off {
+  color: var(--grey);
+}
+.hub-root .dv-listen__default {
+  font-size: 12px;
+  color: var(--grey);
+  font-style: italic;
+}
+.hub-root .dv-listen__status {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--grey);
+}
+.hub-root .dv-listen__status:empty {
+  display: none;
+}
+.hub-root .dv-listen__err {
+  color: var(--danger);
+}
+
 /* ---------- dialogs ---------- */
 .hub-root .dv-dialog--wide,
 .dv-dialog--wide {

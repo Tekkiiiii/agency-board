@@ -6,8 +6,11 @@ import { SubmitButton } from "../_components/client/SubmitButton";
 import {
   directorToDemote,
   identLabel,
+  hasListenSlider,
+  listenKey,
   loadDevicesPage,
   agentAllowedOnOs,
+  loadListenMinutes,
   needsRestrictedWarning,
   RESTRICTED_WARNING,
   type AlertView,
@@ -16,6 +19,7 @@ import {
 import { lastSeen } from "../../../lib/dash/fleet";
 import { requireAdmin } from "../../../lib/dash/session";
 import { listIdentities, type IdentityRow } from "../../../lib/roles";
+import { LISTEN_DEFAULT } from "../../../lib/agentSettings";
 import { ROLES, type Role } from "../../../lib/types";
 import {
   disableDeviceAction,
@@ -25,7 +29,7 @@ import {
   trustAlertAction,
   type DeviceErrorCode,
 } from "./actions";
-import { AddDeviceForm, RoleControl, RotateControl } from "./devices.client";
+import { AddDeviceForm, ListenControl, RoleControl, RotateControl } from "./devices.client";
 import "./devices.css";
 
 export const dynamic = "force-dynamic";
@@ -69,6 +73,8 @@ export default async function DevicesPage({ searchParams }: { searchParams: Prom
   const sp = await searchParams;
   const [main, ids] = await Promise.all([settle(loadDevicesPage()), settle(listIdentities())]);
   const notice = errorText(sp.e);
+  // Never throws: a missing agent_settings table (migration 20261013000007 not applied) just means every slider shows the default.
+  const listen = ids.ok ? await loadListenMinutes(ids.value) : new Map<string, number>();
 
   return (
     <>
@@ -99,7 +105,7 @@ export default async function DevicesPage({ searchParams }: { searchParams: Prom
           agents={DEVICE_AGENTS.map((id) => ({ id, restricted: isRestricted(id), windowsBlocked: !agentAllowedOnOs(id, "windows") }))}
         />
       </Card>
-      <IdentitiesSection ids={ids.ok ? ids.value : null} />
+      <IdentitiesSection ids={ids.ok ? ids.value : null} listen={listen} />
     </>
   );
 }
@@ -337,7 +343,7 @@ function DevicesSection({ devices }: { devices: DeviceView[] }) {
 
 // ---------- identities ----------
 
-function IdentitiesSection({ ids }: { ids: IdentityRow[] | null }) {
+function IdentitiesSection({ ids, listen }: { ids: IdentityRow[] | null; listen: Map<string, number> }) {
   if (ids === null) {
     return (
       <Card title="Identities and roles">
@@ -377,6 +383,31 @@ function IdentitiesSection({ ids }: { ids: IdentityRow[] | null }) {
       ),
     },
     {
+      key: "listen",
+      header: "Listen / wait",
+      width: "300px",
+      render: (i) => {
+        if (!hasListenSlider(i.agent)) {
+          return (
+            <span className="hub-muted" title="This agent has no hooks, so /listen and /wait do not apply">
+              <span aria-hidden="true">—</span>
+              <span className="hub-sr-only">Not available: this agent has no hooks</span>
+            </span>
+          );
+        }
+        const stored = listen.get(listenKey(i.agent, i.device_id));
+        return (
+          <ListenControl
+            agent={i.agent}
+            deviceId={i.device_id}
+            ident={identLabel(i)}
+            minutes={stored ?? LISTEN_DEFAULT}
+            isDefault={stored === undefined}
+          />
+        );
+      },
+    },
+    {
       key: "grants",
       header: "Grants",
       render: (i) =>
@@ -409,7 +440,7 @@ function IdentitiesSection({ ids }: { ids: IdentityRow[] | null }) {
   return (
     <Card
       title="Identities and roles"
-      subtitle="One director at a time. Roles set dispatch, review and forget rights; confidential access is on the Access page."
+      subtitle="One director at a time. Roles set dispatch, review and forget rights; confidential access is on the Access page. Listen / wait: how often a /listen or /wait session checks the board, in minutes (0 = off, default 30)."
       flush
       className="dv-tablecard"
     >

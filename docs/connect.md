@@ -50,7 +50,8 @@ Running the script again (with a new code) is safe: every edit is a marker block
 When the heartbeat script changes (for example the session-start inbox below), re-run connect with
 `--hooks-only`. It needs no code: it reads the existing `~/.agency-board/claude.token`, rewrites only
 `heartbeat.sh` / `heartbeat.ps1` and `linger.sh` (macOS / Linux), and adds the `SessionStart` / `Stop` hooks (and the
-[linger hooks](#10-post-task-linger-window)) if they are missing. It does
+[linger hooks](#10-post-task-linger-window)) if they are missing. On macOS / Linux it also installs the
+[/listen, /wait, /unlisten commands](#12-listen-wait-unlisten) and raises an old linger `Stop` hook timeout to 86400 s. It does
 no code exchange and does not touch the MCP, Codex, or Hermes config. Its only server call is the
 best-effort agent-guide download (see "Agent guide" below).
 
@@ -106,8 +107,11 @@ not change are not touched and not backed up. The script prints the list of chan
 | `~/.zshrc`, `~/.bash_profile` (only if it exists) | block `export AGENCY_BOARD_TOKEN_CODEX="$(cat ~/.agency-board/codex.token)"` |
 | `~/.hermes/.env` | `AGENCY_BOARD_TOKEN_HERMES=...` line (replaced in place) |
 | `~/.hermes/config.yaml` | `agency-board:` entry inserted right under the top-level `mcp_servers:` (key created at EOF if absent) |
-| `~/.claude/settings.json` | `SessionStart` + `Stop` hooks running `sh ~/.agency-board/heartbeat.sh ...` (edited as JSON with `osascript -l JavaScript`; skipped if a hook with `agency-board/heartbeat.sh` exists), plus `PostToolUse` (matcher `mcp__agency-board__complete_task`) and a second `Stop` hook (timeout 1900 s) running `sh ~/.agency-board/linger.sh mark\|stop claude`; each is skipped if a hook with `agency-board/linger.sh` exists in that event |
-| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | the same two linger hooks with agent `codex`; existing hooks are kept. Codex asks you to trust new hooks once: run `/hooks` in Codex |
+| `~/.claude/settings.json` | `SessionStart` + `Stop` hooks running `sh ~/.agency-board/heartbeat.sh ...` (edited as JSON with `osascript -l JavaScript`; skipped if a hook with `agency-board/heartbeat.sh` exists), plus `PostToolUse` (matcher `mcp__agency-board__complete_task`) and a second `Stop` hook (timeout 86400 s) running `sh ~/.agency-board/linger.sh mark\|stop claude`; each is skipped if a hook with `agency-board/linger.sh` exists in that event, except that an existing linger `Stop` hook with a timeout below 86400 is raised to 86400 (upgrade path, section 12) |
+| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | the same two linger hooks with agent `codex` plus an `Interrupt` hook (`sh ~/.agency-board/linger.sh interrupt codex`); existing hooks are kept. Codex asks you to trust new hooks once: run `/hooks` in Codex |
+| `~/.claude/commands/{listen,wait,unlisten}.md` | slash commands `/listen`, `/wait`, `/unlisten` (section 12). Each file carries the marker line `<!-- agency-board:commands v1 -->` after the frontmatter; a file without the marker is not overwritten (warning) |
+| `~/.codex/prompts/{listen,wait,unlisten}.md`, `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (only with a codex token and an existing `~/.codex`) | Codex equivalents: custom prompts (`/prompts:listen`) and skills (`$listen`), see section 12 |
+| `~/.agency-board/listen/` | dir mode 700; per-session state files `<agent>-<session_id>` and `<agent>-pending` created by `/listen` and `/wait`, removed by `/unlisten` or Esc |
 
 Blocks are delimited by `# >>> agency-board >>>` and `# <<< agency-board <<<`.
 Codex/Hermes steps run only if the tool is installed (or its config dir/file exists).
@@ -145,6 +149,8 @@ claude mcp remove -s user agency-board
 #   ~/.codex/config.toml  ~/.zshrc  ~/.bash_profile  ~/.hermes/config.yaml
 # delete the AGENCY_BOARD_TOKEN_HERMES= line in ~/.hermes/.env
 # delete the heartbeat and linger hooks in ~/.claude/settings.json (and the linger hooks in ~/.codex/hooks.json)
+rm -f ~/.claude/commands/{listen,wait,unlisten}.md ~/.codex/prompts/{listen,wait,unlisten}.md
+rm -rf ~/.agents/skills/listen ~/.agents/skills/wait ~/.agents/skills/unlisten
 rm -rf ~/.agency-board
 ```
 
@@ -351,7 +357,7 @@ How it works (macOS / Linux; Claude Code, and Codex once its hooks are trusted):
 2. At `Stop`, `linger.sh stop` exits at once if the session has no marker. With a marker it deletes it and polls
    `GET /api/v1/tasks?mine=1&status=open` (open tasks handed to this identity; claimed tasks are ignored) once
    immediately, then every `AGENCY_BOARD_LINGER_INTERVAL` seconds (default 300), until `AGENCY_BOARD_LINGER_WINDOW` seconds
-   (default 1800, capped at 1850 so the 1900 s hook timeout always covers it) have passed.
+   (default 1800, capped at 1850 by the script) have passed. The linger `Stop` hook timeout is 86400 s, so it also covers the open-ended listen loop (section 12).
 3. Open task(s) found: it prints `{"decision":"block","reason":"..."}`, so the agent continues instead of stopping.
    The reason is a pointer (count, task ids, titles reduced to a safe character set and 60 characters, then the board
    policy R2/R9/R10); task text stays untrusted data (R1). When the agent completes that task, the marker is written
@@ -403,3 +409,66 @@ claimed on the strength of an alert: R2/R3 are unchanged, and the worker never w
   `stale=peek` is REST only; the MCP schema drops it.
 - **Knobs** (server env, read per request): `STALE_TASK_MIN_MINUTES` (30), `STALE_ACTIVE_MIN_MINUTES` (10). Titles in an
   alert are untrusted (R1): control characters, quotes, brackets and braces removed, 120 characters.
+
+## 12. /listen, /wait, /unlisten
+
+Slash commands that keep a session checking the board until told to stop. They reuse the linger machinery (section 10):
+one script (`~/.agency-board/linger.sh`), one `Stop` hook, no extra loop or daemon. Installed by `connect.sh`, also with
+`--hooks-only`. macOS / Linux only; `connect.ps1` does not install them (not covered).
+
+| Command | Effect |
+|---|---|
+| `/listen` | Session polls its inbox and works tasks handed to it (R2, R9, R10). `linger.sh arm <agent> listen` |
+| `/wait` | Session polls and only alerts your user when a task handed to it arrives (and on stale alerts). It never claims or works (R2, R3). `linger.sh arm <agent> wait` |
+| `/unlisten` | Turns either mode off for this session. `linger.sh disarm <agent> [session-id]`; without an id it removes every session state of that agent on this machine |
+
+- **Open-ended**: no window. The mode lasts until `/unlisten` or Esc. Esc kills the hook (TERM/INT/HUP); the trap removes
+  the session state, so Esc also turns the mode off. `/unlisten` from another terminal is seen within one tick
+  (state file gone; sleep is chunked in `AGENCY_BOARD_LISTEN_TICK` seconds, default 5).
+- **Poll**: `GET /api/v1/tasks?mine=1&status=open`, once at once, then every `listen_minutes` minutes. Hook stop conditions
+  as in section 10: HTTP 401/403, `dispatch_paused` true, three failed requests in a row (log, exit 0; the mode stays armed). A failed poll is retried after 60 s, not after a full interval.
+- **Interval = dashboard slider**: `/dashboard/devices`, section Identities, column "Listen / wait", per agent@machine
+  (claude and codex only; hermes and grok have no hooks). Range 0-60 min, step 1, default 30. **0 = off**: `/listen` and
+  `/wait` print an "OFF" message and arm nothing; an armed session whose slider becomes 0 disarms itself at the next poll.
+  The value comes back as `listen_minutes` in the poll body and is re-read on every poll, so a slider change applies to the
+  next sleep, not to the sleep in progress. Server unreachable at arm time: armed with 30 and the message says so.
+  If migration `20261013000007_agent_settings.sql` is not applied, every reader returns 30 and the slider cannot save.
+- **No per-call override** (`/listen 15` is not supported; arguments are ignored). Why: the slider is the single source of
+  truth, server side; a second place would diverge from it and from `0 = off`.
+- **De-dupe / guard**: `wait` announces each task id and each stale alert once (`seen=` in the state file); without it the
+  loop would re-alert forever. `listen` skips a task id that already blocked the stop 3 times and is still open (`blk=`),
+  so a task the agent cannot finish does not trap the session. The hit output is the same `{"decision":"block",...}` JSON
+  as section 10 (wait: text says tell your user, do NOT claim; plus `systemMessage`). Titles stay untrusted (R1).
+- **Files**: `~/.claude/commands/{listen,wait,unlisten}.md` (frontmatter `description`, `disable-model-invocation: true`,
+  `allowed-tools: Bash(sh ~/.agency-board/linger.sh:*)`; body injects `linger.sh arm claude <mode> "${CLAUDE_SESSION_ID}"`),
+  marker `<!-- agency-board:commands v1 -->`, state dir `~/.agency-board/listen/` (mode 700, files older than 2 days pruned
+  at arm), log lines `listen[<agent> <sid8>] ...` in `~/.agency-board/linger.log` (ids and counts only).
+- **Stop hook timeout 86400 s** (was 1900): the listen loop has no deadline, so the hook must not be cut off. `connect.sh`
+  skips hooks that already exist, but raises an existing `linger.sh` `Stop` hook with a lower timeout to 86400.
+- **Token cost**: each poll is one HTTP request outside the model; a model turn only happens on a hit. The 30 min default
+  keeps the idle cost at about 2 requests per hour per armed session.
+
+Codex differences (not testable here: no Codex CLI in the build environment; the install and the hook logic are covered by
+script tests only, a real Codex session was not run):
+
+- Custom prompts (`~/.codex/prompts/{listen,wait,unlisten}.md`, invoked `/prompts:listen`) are deprecated by OpenAI but still
+  read; they cannot run shell commands themselves, so the prompt text tells the model to run
+  `sh ~/.agency-board/linger.sh arm codex <mode>`. Skills (`~/.agents/skills/{listen,wait,unlisten}/SKILL.md`, invoked
+  `$listen` or `/skills`) are installed as the supported equivalent. Both only when a codex token and `~/.codex` exist.
+- Codex gives the command no session id (the docs name no session-id env var), so `arm` writes
+  `~/.agency-board/listen/codex-pending`; the next `Stop` of that agent with a pending file younger than 300 s binds it to its
+  own `session_id`. Two Codex sessions arming within 300 s can bind to the wrong one.
+- An `Interrupt` hook (`linger.sh interrupt codex`, reads `session_id` from stdin, silent) is the Esc equivalent. The event is
+  documented but untested; if it never fires, stop with `/unlisten` (`$unlisten`).
+- New Codex hooks need one-time trust: run `/hooks` in Codex.
+- Sources (2026-10-13): custom prompts (deprecated) https://developers.openai.com/codex/custom-prompts ; hooks (Stop, Interrupt,
+  `~/.codex/hooks.json`, `session_id`, `/hooks` trust) https://developers.openai.com/codex/hooks ; skills (`$HOME/.agents/skills`,
+  `$name`, `/skills`) https://developers.openai.com/codex/build-skills ; Claude Code commands (`~/.claude/commands/*.md`, `!`
+  injection, `${CLAUDE_SESSION_ID}`, `allowed-tools`) https://code.claude.com/docs/en/skills .
+
+Upgrade path for an installed machine: re-run `connect.sh --hooks-only` (section 2). It writes the new `linger.sh`, installs the
+command files (existing files without the marker are kept and warned about) and raises the linger `Stop` hook timeout to
+86400. Without the re-run the old hook (timeout 1900) would kill a listen loop after about 32 minutes. Restart the Claude/Codex
+session afterwards so the commands and hooks load.
+
+Not covered: Windows (`connect.ps1`), Hermes and Grok (no stop hook), `/listen` in the launchd auto-worker (section 9 polls on its own).

@@ -7,8 +7,13 @@ import {
   baseUrlFrom,
   describeNetwork,
   directorToDemote,
+  hasListenSlider,
   identLabel,
+  listenKey,
+  listenLabel,
   needsRestrictedWarning,
+  parseListenForm,
+  sliderMinutes,
   type RoleHolder,
 } from "../lib/dash/devices";
 
@@ -90,5 +95,53 @@ describe("baseUrlFrom", () => {
   });
   it("localhost defaults to http", () => {
     expect(baseUrlFrom("", h({ host: "localhost:13104" }))).toBe("http://localhost:13104");
+  });
+});
+
+describe("listen/wait slider helpers", () => {
+  it("label: Off at 0, otherwise N min", () => {
+    expect(listenLabel(0)).toBe("Off");
+    expect(listenLabel(1)).toBe("1 min");
+    expect(listenLabel(30)).toBe("30 min");
+    expect(listenLabel(60)).toBe("60 min");
+  });
+  it("sliderMinutes clamps and rounds to an integer 0..60, junk falls back to the default 30", () => {
+    expect(sliderMinutes("0")).toBe(0);
+    expect(sliderMinutes("45")).toBe(45);
+    expect(sliderMinutes(60)).toBe(60);
+    expect(sliderMinutes(61)).toBe(60);
+    expect(sliderMinutes(-5)).toBe(0);
+    expect(sliderMinutes("12.6")).toBe(13);
+    expect(sliderMinutes("abc")).toBe(30);
+    expect(sliderMinutes(undefined)).toBe(30);
+    expect(sliderMinutes(NaN)).toBe(30);
+  });
+  it("only agents that run hooks (claude, codex) get a slider", () => {
+    expect(hasListenSlider("claude")).toBe(true);
+    expect(hasListenSlider("codex")).toBe(true);
+    expect(hasListenSlider("hermes")).toBe(false);
+    expect(hasListenSlider("grok")).toBe(false);
+    expect(hasListenSlider("x")).toBe(false);
+  });
+  it("listenKey matches listListenMinutes keys", () => {
+    expect(listenKey("claude", "d1")).toBe("claude:d1");
+  });
+});
+
+describe("parseListenForm (server-side validation of the slider post)", () => {
+  const D = "0b0f6f0e-3c1d-4f4a-9a52-2a6d0a1f5b11";
+  const fd = (m: Record<string, string>) => ({ get: (k: string) => m[k] ?? null });
+  it("accepts claude/codex, a uuid and 0..60", () => {
+    expect(parseListenForm(fd({ agent: "claude", device_id: D, minutes: "0" }))).toEqual({ agent: "claude", device_id: D, minutes: 0 });
+    expect(parseListenForm(fd({ agent: "codex", device_id: D, minutes: "60" }))).toEqual({ agent: "codex", device_id: D, minutes: 60 });
+  });
+  it("rejects hermes, grok, unknown agents, bad uuid, out of range, fractional, junk, missing", () => {
+    const ok = { agent: "claude", device_id: D, minutes: "30" };
+    for (const bad of [
+      { ...ok, agent: "hermes" }, { ...ok, agent: "grok" }, { ...ok, agent: "root" }, { ...ok, agent: "" },
+      { ...ok, device_id: "nope" }, { ...ok, device_id: "" },
+      { ...ok, minutes: "61" }, { ...ok, minutes: "-1" }, { ...ok, minutes: "1.5" }, { ...ok, minutes: "abc" }, { ...ok, minutes: "" },
+    ]) expect(parseListenForm(fd(bad)), JSON.stringify(bad)).toBeNull();
+    expect(parseListenForm(fd({}))).toBeNull();
   });
 });

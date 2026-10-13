@@ -1,6 +1,9 @@
+import { z } from "zod";
 import { listAlerts } from "../access";
 import { DEVICE_AGENTS, isRestricted } from "../config";
 import { db } from "../db";
+import { listListenMinutes, parseListenMinutes } from "../agentSettings";
+import { hasListenSlider, listenKey } from "./listen";
 import { listDevices } from "../devices";
 import type { AgentId, Role } from "../types";
 
@@ -61,6 +64,27 @@ export function agentAllowedOnOs(agent: AgentId, os: DeviceOs | null | undefined
 /** Drops agents the OS cannot run; returns the kept list (deduplicated, input order). */
 export function agentsForOs(agents: AgentId[], os: DeviceOs | null | undefined): AgentId[] {
   return Array.from(new Set(agents)).filter((a) => agentAllowedOnOs(a, os));
+}
+
+// ---------- listen/wait slider (Addendum 2: 0-60 minutes, step 1, default 30, 0 = off) ----------
+// Pure helpers live in ./listen (client-safe, no db import) and are re-exported here.
+export { LISTEN_AGENTS, hasListenSlider, listenKey, listenLabel, sliderMinutes } from "./listen";
+
+/** Server-side validation of the slider post: agent allow-list, uuid device id, integer 0..60. null = invalid. */
+export function parseListenForm(fd: { get(name: string): unknown }): { agent: AgentId; device_id: string; minutes: number } | null {
+  const agent = String(fd.get("agent") ?? "");
+  const device = String(fd.get("device_id") ?? "");
+  const minutes = parseListenMinutes(fd.get("minutes"));
+  if (!hasListenSlider(agent) || minutes === null || !z.uuid().safeParse(device).success) return null;
+  return { agent: agent as AgentId, device_id: device, minutes };
+}
+
+/** Stored intervals for the identities that get a slider; missing row/table -> not in the map (page shows the default). Never throws. */
+export async function loadListenMinutes(ids: Array<{ agent: string; device_id: string }>): Promise<Map<string, number>> {
+  const slider = ids.filter((i) => hasListenSlider(i.agent));
+  const all = await listListenMinutes(Array.from(new Set(slider.map((i) => i.device_id))));
+  const wanted = new Set(slider.map((i) => listenKey(i.agent, i.device_id)));
+  return new Map([...all].filter(([k]) => wanted.has(k)));
 }
 
 export interface RoleHolder {

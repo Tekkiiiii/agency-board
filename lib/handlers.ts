@@ -2,6 +2,7 @@ import { STALE_ALERTS_PER_POLL, STALE_EVENT, staleAlertText, staleConfig, waitin
 import { OWNER_NAME } from "./config";
 import { db } from "./db";
 import { embed, EMBED_MODEL } from "./embed";
+import { getListenMinutes } from "./agentSettings";
 import { assertConfidentialTiers, contractOk, instructionLike, CONFIDENTIAL_SLUG } from "./guard";
 import { canSee, ident, insertLinks, parseWikiLinks, VIS_COLS, type LinkSpec } from "./links";
 import { enforce } from "./request";
@@ -404,7 +405,8 @@ export async function listTasks(ctx: AgentCtx, input: unknown) {
   const tasks = visible.map((t) => ({ ...t, assigned_by_role: typeof t.assigned_by === "string" ? (roles.get(t.assigned_by) ?? null) : null }));
   // `stale=peek` is not in the zod schema (MCP callers cannot send it); it is read from the raw REST input.
   const stale = await staleAlerts(ctx, (input as { stale?: unknown } | null)?.stale === "peek");
-  return { tasks, dispatch_paused: false, ...(stale.length ? { stale_alerts: stale } : {}) };
+  const listen = p.mine ? { listen_minutes: await getListenMinutes(ctx.agent, ctx.deviceId) } : {};
+  return { tasks, dispatch_paused: false, ...listen, ...(stale.length ? { stale_alerts: stale } : {}) };
 }
 
 export async function claimTask(ctx: AgentCtx, input: unknown) {
@@ -468,7 +470,7 @@ export async function heartbeat(ctx: AgentCtx, input: unknown) {
   if (p.task_id) patch.current_task_id = p.task_id; // omitted -> keep (session hooks send no task_id)
   await run(db().from("agent_tokens").update(patch).eq("id", ctx.tokenId));
   if (ctx.deviceId) await run(db().from("devices").update({ last_seen_at: t }).eq("id", ctx.deviceId));
-  return { ok: true, at: t, lease_renewed, flags: ctx.flags };
+  return { ok: true, at: t, lease_renewed, flags: ctx.flags, listen_minutes: await getListenMinutes(ctx.agent, ctx.deviceId) };
 }
 
 export async function completeTask(ctx: AgentCtx, input: unknown) {
@@ -565,7 +567,7 @@ export async function inbox(ctx: AgentCtx, input: unknown) {
     )) ?? [];
   const tasks = rows.filter((t) => canRead(ctx, t.namespace)).slice(0, 10);
   const stale = await staleAlerts(ctx, false);
-  return { ident: ctx.ident, count: tasks.length, tasks, ...(stale.length ? { stale_alerts: stale } : {}) };
+  return { ident: ctx.ident, count: tasks.length, tasks, listen_minutes: await getListenMinutes(ctx.agent, ctx.deviceId), ...(stale.length ? { stale_alerts: stale } : {}) };
 }
 
 // Plain-text form for the SessionStart hook (§15). Titles are untrusted: control chars removed, <= 120 chars.

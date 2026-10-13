@@ -4,7 +4,8 @@ import { Fragment, startTransition, useActionState, useEffect, useId, useRef, us
 import { CopyButton } from "../_components/client/CopyButton";
 import { SubmitButton } from "../_components/client/SubmitButton";
 import type { AgentId, Role } from "../../../lib/types";
-import { addDeviceAction, rotateDeviceAction, setRoleAction } from "./actions";
+import { listenLabel, sliderMinutes } from "../../../lib/dash/listen";
+import { addDeviceAction, rotateDeviceAction, setListenMinutesAction, setRoleAction } from "./actions";
 import { INITIAL_STATE, type ConnectResult } from "./types";
 
 const ROLE_OPTIONS: Role[] = ["director", "lead", "member"];
@@ -420,6 +421,128 @@ export function RoleControl({
           </div>
         </form>
       </dialog>
+    </div>
+  );
+}
+
+// ---------- listen / wait interval ----------
+
+// How often a /listen or /wait session checks the board, per agent@machine. Range 0-60, step 1, 0 = off.
+// The label follows the thumb live; the value is saved on release (pointer up) or shortly after the last keyboard step.
+// A failed save (for example migration 20261013000007 not applied) shows inline and puts the stored value back.
+const LISTEN_HELP = "How often a /listen or /wait session checks the board. 0 = off.";
+const KEY_COMMIT_MS = 500;
+
+export function ListenControl({
+  agent,
+  deviceId,
+  ident,
+  minutes,
+  isDefault,
+}: {
+  agent: AgentId;
+  deviceId: string;
+  ident: string;
+  minutes: number; // stored value, or the default 30 when no row exists
+  isDefault: boolean;
+}) {
+  const [state, formAction, pending] = useActionState(setListenMinutesAction, INITIAL_STATE);
+  const [value, setValue] = useState(minutes);
+  const [saved, setSaved] = useState(minutes); // last value the server accepted (or the loaded one)
+  const [touched, setTouched] = useState(false); // a save was attempted, so the status line may speak
+  const live = useRef(minutes);
+  const dragging = useRef(false);
+  const timer = useRef<number | null>(null);
+  const id = useId();
+
+  useEffect(() => {
+    setValue(minutes);
+    setSaved(minutes);
+    live.current = minutes;
+  }, [minutes]);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  useEffect(() => {
+    // Failed save: show the stored value again (same as the role select).
+    if (state.error) {
+      setValue(saved);
+      live.current = saved;
+    }
+  }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function commit() {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+    const m = live.current;
+    if (m === saved) return;
+    const fd = new FormData();
+    fd.set("agent", agent);
+    fd.set("device_id", deviceId);
+    fd.set("minutes", String(m));
+    setTouched(true);
+    setSaved(m); // optimistic; reverted by the error effect above
+    startTransition(() => formAction(fd));
+  }
+
+  function onChange(raw: string) {
+    const m = sliderMinutes(raw);
+    live.current = m;
+    setValue(m);
+    if (!dragging.current) {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(commit, KEY_COMMIT_MS);
+    }
+  }
+
+  const status = pending ? "Saving…" : state.error ? null : touched && state.ok ? "Saved" : null;
+  return (
+    <div className="dv-listen">
+      <label htmlFor={`${id}-r`} className="hub-sr-only">
+        Listen and wait interval for {ident}
+      </label>
+      <input
+        id={`${id}-r`}
+        type="range"
+        className="dv-listen__range"
+        min={0}
+        max={60}
+        step={1}
+        value={value}
+        aria-valuetext={listenLabel(value)}
+        aria-describedby={`${id}-help`}
+        aria-busy={pending || undefined}
+        onChange={(e) => onChange(e.target.value)}
+        onPointerDown={() => {
+          dragging.current = true;
+        }}
+        onPointerUp={() => {
+          dragging.current = false;
+          commit();
+        }}
+        onPointerCancel={() => {
+          dragging.current = false;
+          commit();
+        }}
+        onBlur={commit}
+      />
+      <output htmlFor={`${id}-r`} className={`dv-listen__value hub-mono${value === 0 ? " dv-listen__value--off" : ""}`}>
+        {listenLabel(value)}
+      </output>
+      {isDefault && touched === false && value === minutes && (
+        <span className="dv-listen__default" title="No interval set yet; 30 minutes is the default">
+          default
+        </span>
+      )}
+      <span id={`${id}-help`} className="hub-sr-only">
+        {LISTEN_HELP}
+      </span>
+      <span className="dv-listen__status" aria-live="polite">
+        {status}
+        {state.error && <span className="dv-listen__err">{state.error}</span>}
+      </span>
     </div>
   );
 }

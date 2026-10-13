@@ -594,7 +594,7 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("--hooks-only installs linger.sh (base substituted) and registers PostToolUse + Stop(1900 s) next to the heartbeat hooks", () => {
+  it("--hooks-only installs linger.sh (base substituted) and registers PostToolUse + Stop(86400 s) next to the heartbeat hooks", () => {
     writeTokens();
     const r = run(["--", "--hooks-only"]);
     expect(r.status, r.stderr).toBe(0);
@@ -611,7 +611,7 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     // same-machine handoff -> launchctl kickstart (instant worker pickup), fired after a handoff or a post_task
     expect(s.hooks.PostToolUse[1].matcher).toBe("mcp__agency-board__handoff|mcp__agency-board__post_task");
     const stop = s.hooks.Stop.flatMap((g: any) => g.hooks).find((h: any) => h.command.includes("linger.sh"));
-    expect(stop.timeout).toBe(1900);
+    expect(stop.timeout).toBe(86400);
     expect(existsSync(CHJ())).toBe(false); // no codex token: codex untouched
     expect(r.stdout).not.toContain(FAKE_TOKEN);
   });
@@ -680,7 +680,7 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(cmds(h, "Stop")).toEqual(["sh ~/.agency-board/linger.sh stop codex"]);
     expect(cmds(h, "PostToolUse")).toEqual(["sh ~/.agency-board/linger.sh mark codex", "sh ~/.agency-board/linger.sh kick codex"]);
     expect(h.hooks.PostToolUse[0].matcher).toBe("mcp__agency-board__complete_task");
-    expect(h.hooks.Stop[0].hooks[0].timeout).toBe(1900);
+    expect(h.hooks.Stop[0].hooks[0].timeout).toBe(86400);
     expect(JSON.stringify(h)).not.toContain("heartbeat");
     const once = readFileSync(CHJ(), "utf8");
     const r2 = run(["--", "--hooks-only"]);
@@ -719,6 +719,209 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r2.stdout).not.toMatch(/linger\.sh|settings\.json|hooks\.json/);
     expect(baks(join(home, ".claude"), "settings.json")).toEqual([]); // there was nothing to back up on the first run
     expect(baks(join(home, ".codex"), "hooks.json")).toEqual([]);
+  });
+
+  // ---- /listen /wait /unlisten: Stop timeout upgrade, slash commands (Claude), prompts + skills + Interrupt hook (Codex) ----
+  describe("listen / wait / unlisten install", () => {
+    const CMARK = "<!-- agency-board:commands v1 -->";
+    const CMDS = () => join(home, ".claude", "commands");
+    const CPROMPTS = () => join(home, ".codex", "prompts");
+    const CSKILLS = () => join(home, ".agents", "skills");
+    const dollarBrace = "$" + "{CLAUDE_SESSION_ID}";
+    const bang = (s: string) => "!" + String.fromCharCode(96) + s + String.fromCharCode(96);
+    const stopTimeouts = (o: any) => o.hooks.Stop.flatMap((g: any) => g.hooks).filter((h: any) => h.command.includes("linger.sh")).map((h: any) => h.timeout);
+
+    it("upgrades an already installed linger Stop hook from 1900 to 86400 (backup first, other hooks untouched), then is a no-op", () => {
+      writeTokens();
+      mkdirSync(join(home, ".claude"));
+      const old = {
+        model: "opus",
+        hooks: {
+          SessionStart: [{ matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/heartbeat.sh session-start" }] }],
+          Stop: [
+            { matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/heartbeat.sh stop" }] },
+            { matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh stop claude", timeout: 1900 }] },
+            { matcher: "", hooks: [{ type: "command", command: "echo mine", timeout: 5 }] },
+          ],
+          PostToolUse: [
+            { matcher: "mcp__agency-board__complete_task", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh mark claude" }] },
+            { matcher: "mcp__agency-board__handoff|mcp__agency-board__post_task", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh kick claude" }] },
+          ],
+        },
+      };
+      writeFileSync(SJ(), JSON.stringify(old, null, 2) + "\n");
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      const s = readJson(SJ());
+      expect(stopTimeouts(s)).toEqual([86400]);
+      expect(s.hooks.Stop[2].hooks[0].timeout).toBe(5); // a user hook is not touched
+      expect(cmds(s, "Stop")).toEqual(["sh ~/.agency-board/heartbeat.sh stop", "sh ~/.agency-board/linger.sh stop claude", "echo mine"]);
+      const b = baks(join(home, ".claude"), "settings.json");
+      expect(b).toHaveLength(1);
+      expect(readJson(join(home, ".claude", b[0]))).toEqual(old);
+      const once = readFileSync(SJ(), "utf8");
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      expect(readFileSync(SJ(), "utf8")).toBe(once);
+      expect(baks(join(home, ".claude"), "settings.json")).toHaveLength(1);
+    });
+
+    it("never lowers a higher timeout and leaves a timeout-less non-linger hook alone", () => {
+      writeTokens();
+      mkdirSync(join(home, ".claude"));
+      const old = { hooks: { Stop: [{ matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh stop claude", timeout: 99999 }] }] } };
+      writeFileSync(SJ(), JSON.stringify(old, null, 2) + "\n");
+      run(["--", "--hooks-only"]);
+      expect(stopTimeouts(readJson(SJ()))).toEqual([99999]);
+    });
+
+    it("claude: installs listen.md, wait.md, unlisten.md (frontmatter, marker after it, bang arm line, allowed-tools), idempotent rerun", () => {
+      writeTokens();
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readdirSync(CMDS()).sort()).toEqual(["listen.md", "unlisten.md", "wait.md"]);
+      const want: Array<[string, string]> = [
+        ["listen", `sh ~/.agency-board/linger.sh arm claude listen "${dollarBrace}"`],
+        ["wait", `sh ~/.agency-board/linger.sh arm claude wait "${dollarBrace}"`],
+        ["unlisten", `sh ~/.agency-board/linger.sh disarm claude "${dollarBrace}"`],
+      ];
+      for (const [name, cmd] of want) {
+        const t = readFileSync(join(CMDS(), `${name}.md`), "utf8");
+        const lines = t.split("\n");
+        expect(lines[0]).toBe("---");
+        const end = lines.indexOf("---", 1);
+        expect(end).toBeGreaterThan(1);
+        const fm = lines.slice(1, end).join("\n");
+        expect(fm).toMatch(/^description: .+/m);
+        expect(fm).toMatch(/^disable-model-invocation: true$/m);
+        expect(fm).toContain("allowed-tools: Bash(sh ~/.agency-board/linger.sh:*)");
+        expect(lines[end + 1]).toBe(CMARK); // marker right after the frontmatter
+        expect(lines).toContain(bang(cmd));
+        expect(t).not.toContain("$ARGUMENTS");
+        expect(t).not.toContain(FAKE_TOKEN);
+      }
+      const listen = readFileSync(join(CMDS(), "listen.md"), "utf8");
+      expect(listen).toMatch(/list_tasks/);
+      expect(listen).toMatch(/R2/);
+      expect(readFileSync(join(CMDS(), "wait.md"), "utf8")).toMatch(/do NOT claim/i);
+      // rerun: byte-identical, no new backups, nothing reported as changed
+      const snap = readdirSync(CMDS()).map((f) => readFileSync(join(CMDS(), f), "utf8"));
+      const r2 = run(["--", "--hooks-only"]);
+      expect(r2.status, r2.stderr).toBe(0);
+      expect(readdirSync(CMDS()).sort()).toEqual(["listen.md", "unlisten.md", "wait.md"]); // no .bak files
+      expect(readdirSync(CMDS()).map((f) => readFileSync(join(CMDS(), f), "utf8"))).toEqual(snap);
+      expect(r2.stdout).not.toContain("Files changed");
+      expect(r2.stdout).toContain("heartbeat.sh, linger.sh and hooks already up to date");
+    });
+
+    it("a pre-existing command file WITHOUT the marker is left alone with a warning; the other two are still installed", () => {
+      writeTokens();
+      mkdirSync(CMDS(), { recursive: true });
+      writeFileSync(join(CMDS(), "wait.md"), "my own /wait command\n");
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(CMDS(), "wait.md"), "utf8")).toBe("my own /wait command\n");
+      expect(r.stderr).toMatch(/wait\.md/);
+      expect(r.stderr).toMatch(/marker|not agency-board|left unchanged/i);
+      expect(existsSync(join(CMDS(), "listen.md"))).toBe(true);
+      expect(existsSync(join(CMDS(), "unlisten.md"))).toBe(true);
+      expect(readdirSync(CMDS()).filter((f) => f.includes(".bak"))).toEqual([]);
+    });
+
+    it("a marked command file whose content differs is refreshed, with a backup of the old one", () => {
+      writeTokens();
+      mkdirSync(CMDS(), { recursive: true });
+      writeFileSync(join(CMDS(), "listen.md"), `---\ndescription: old\n---\n${CMARK}\nold body\n`);
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(CMDS(), "listen.md"), "utf8")).toContain("linger.sh arm claude listen");
+      const b = baks(CMDS(), "listen.md");
+      expect(b).toHaveLength(1);
+      expect(readFileSync(join(CMDS(), b[0]), "utf8")).toContain("old body");
+    });
+
+    it("full connect installs the commands too; --no-heartbeat does not", () => {
+      const resp = join(dir, "resp.json");
+      writeFileSync(resp, JSON.stringify({ server_url: `${STUB_BASE}/api/mcp`, machine: "m1", token_claude: FAKE_TOKEN }));
+      writeFileSync(script, CONNECT_SH.split("__AGENCY_BOARD_BASE_URL__").join(`file://${dir}`));
+      expect(run(["ABCD2345", "--no-heartbeat"], { AGENCY_BOARD_TEST_RESPONSE_FILE: resp }).status).toBe(0);
+      expect(existsSync(CMDS())).toBe(false);
+      const r = run(["ABCD2345"], { AGENCY_BOARD_TEST_RESPONSE_FILE: resp });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readdirSync(CMDS()).sort()).toEqual(["listen.md", "unlisten.md", "wait.md"]);
+      const snap = readFileSync(join(CMDS(), "listen.md"), "utf8");
+      expect(run(["ABCD2345"], { AGENCY_BOARD_TEST_RESPONSE_FILE: resp }).stdout).not.toMatch(/listen\.md/);
+      expect(readFileSync(join(CMDS(), "listen.md"), "utf8")).toBe(snap);
+    });
+
+    it("the installed linger.sh is the new one (arm mode present) and parses", () => {
+      writeTokens();
+      run(["--", "--hooks-only"]);
+      const l = readFileSync(join(AMD(), "linger.sh"), "utf8");
+      expect(l).toContain("AGENCY_BOARD_LISTEN_UNIT");
+      expect(spawnSync("/bin/sh", ["-n", join(AMD(), "linger.sh")]).status).toBe(0);
+    });
+
+    it("codex: with a codex token and ~/.codex, installs prompts, skills and the Interrupt hook; rerun is a no-op; Stop 1900 upgraded", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(CHJ(), JSON.stringify({ hooks: { Stop: [{ matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh stop codex", timeout: 1900 }] }] } }, null, 2) + "\n");
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readdirSync(CPROMPTS()).sort()).toEqual(["listen.md", "unlisten.md", "wait.md"]);
+      expect(readdirSync(CSKILLS()).sort()).toEqual(["listen", "unlisten", "wait"]);
+      for (const [name, cmd] of [["listen", "arm codex listen"], ["wait", "arm codex wait"], ["unlisten", "disarm codex"]]) {
+        const p = readFileSync(join(CPROMPTS(), `${name}.md`), "utf8");
+        const k = readFileSync(join(CSKILLS(), name, "SKILL.md"), "utf8");
+        for (const t of [p, k]) {
+          expect(t).toContain(CMARK);
+          expect(t).toContain(`sh ~/.agency-board/linger.sh ${cmd}`);
+          expect(t).not.toContain(dollarBrace);
+        }
+        expect(k.split("\n")[0]).toBe("---");
+        expect(k).toMatch(new RegExp(`^name: ${name}$`, "m"));
+        expect(k).toMatch(/^description: .+/m);
+      }
+      const h = readJson(CHJ());
+      expect(cmds(h, "Interrupt")).toEqual(["sh ~/.agency-board/linger.sh interrupt codex"]);
+      expect(stopTimeouts(h)).toEqual([86400]);
+      const snapH = readFileSync(CHJ(), "utf8");
+      const snapP = readdirSync(CPROMPTS()).map((f) => readFileSync(join(CPROMPTS(), f), "utf8"));
+      const r2 = run(["--", "--hooks-only"]);
+      expect(r2.status, r2.stderr).toBe(0);
+      expect(readFileSync(CHJ(), "utf8")).toBe(snapH);
+      expect(readdirSync(CPROMPTS()).map((f) => readFileSync(join(CPROMPTS(), f), "utf8"))).toEqual(snapP);
+      expect(readdirSync(CPROMPTS())).toHaveLength(3);
+      expect(readdirSync(join(CSKILLS(), "listen"))).toEqual(["SKILL.md"]);
+      expect(r2.stdout).not.toMatch(/trust/);
+    });
+
+    it("codex: a pre-existing non-marker prompt or skill is left alone with a warning", () => {
+      writeTokens(true);
+      mkdirSync(CPROMPTS(), { recursive: true });
+      mkdirSync(join(CSKILLS(), "wait"), { recursive: true });
+      writeFileSync(join(CPROMPTS(), "listen.md"), "mine\n");
+      writeFileSync(join(CSKILLS(), "wait", "SKILL.md"), "mine too\n");
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(CPROMPTS(), "listen.md"), "utf8")).toBe("mine\n");
+      expect(readFileSync(join(CSKILLS(), "wait", "SKILL.md"), "utf8")).toBe("mine too\n");
+      expect(r.stderr).toMatch(/listen\.md/);
+      expect(r.stderr).toMatch(/SKILL\.md/);
+      expect(existsSync(join(CPROMPTS(), "wait.md"))).toBe(true);
+    });
+
+    it("codex: no codex token or no ~/.codex means no prompts, no skills, no ~/.agents, no Interrupt hook", () => {
+      writeTokens(true);
+      run(["--", "--hooks-only"]); // codex token, but no ~/.codex dir
+      expect(existsSync(CPROMPTS())).toBe(false);
+      expect(existsSync(join(home, ".agents"))).toBe(false);
+      mkdirSync(join(home, ".codex"), { recursive: true }); // the guide step already created it
+      rmSync(join(AMD(), "codex.token"));
+      run(["--", "--hooks-only"]); // ~/.codex but no token
+      expect(existsSync(CPROMPTS())).toBe(false);
+      expect(existsSync(join(home, ".agents"))).toBe(false);
+      expect(existsSync(CHJ())).toBe(false);
+    });
   });
 
   it("--no-heartbeat skips every hook, linger included", () => {

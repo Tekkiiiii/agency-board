@@ -464,9 +464,10 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
      skip if a hook command containing `agency-board/heartbeat.sh` exists).
      Linger window (docs/connect.md section 10): also write `~/.agency-board/linger.sh` (source `lib/scripts/lingerSh.ts`,
      spliced into connect.sh at `__AGENCY_BOARD_LINGER_SH__`) and add a `PostToolUse` hook (matcher `mcp__agency-board__complete_task`,
-     `sh ~/.agency-board/linger.sh mark claude`) and a `Stop` hook (`... linger.sh stop claude`, timeout 1900) by the same JXA merge
+     `sh ~/.agency-board/linger.sh mark claude`) and a `Stop` hook (`... linger.sh stop claude`, timeout 86400) by the same JXA merge
      (idempotent on `agency-board/linger.sh`); with a codex token and an existing `~/.codex`, the same two hooks go into
-     `~/.codex/hooks.json` with agent `codex`. Windows (`connect.ps1`) has no linger hooks.
+     `~/.codex/hooks.json` with agent `codex` (plus an `Interrupt` hook, §21). An existing linger `Stop` hook with a timeout below 86400 is raised to 86400.
+     Slash commands and Codex prompts/skills: §21. Windows (`connect.ps1`) has no linger hooks and no slash commands.
   8. Print summary: agent, token prefix, files changed, backups; then "Restart your Claude/Codex/Hermes sessions."
   Re-running is safe (idempotent blocks). Never echo full tokens.
 - connect.ps1 (Windows PowerShell 5.1: no `??`, no ternary, no `&&`; `[Net.ServicePointManager]::SecurityProtocol = 'Tls12'`;
@@ -1024,3 +1025,69 @@ Files: `lib/scripts/workerMjs.ts` (`export const WORKER_MJS = String.raw`...``, 
   unchanged when the key is absent.
 - **Dashboard**: `/dashboard/tasks` banner + per-card badge (`lib/dash/board.ts`: `staleTasks`, `activeIdents`,
   `staleSummary`, `loadActiveIdents`), including "nobody is active".
+
+## 21. /listen /wait /unlisten + listen interval slider (operator decision 2026-10-13, Addendum 2 governs)
+Reading of the spec: slider 0-60 min, step 1, default 30, 0 = off, per agent@machine, synced to the hooks. The per-call override
+("/listen 15") is dropped: the slider is the single source of truth. Human doc: `docs/connect.md` section 12.
+
+### 21.1 Database — migration `supabase/migrations/20261013000007_agent_settings.sql` (NOT applied to production)
+- `public.agent_settings (agent text check in claude|codex|hermes|grok, device_id uuid references devices(id) on delete cascade,
+  listen_minutes smallint not null default 30 check between 0 and 60, updated_at timestamptz not null default now(),
+  primary key (agent, device_id))`. RLS on, zero policies, `revoke all from anon, authenticated`, `grant all to service_role`.
+- Own table because no existing one fits: `system_flags` is global, boolean, CHECK-limited keys; `agent_tokens` rotates, so a column
+  there loses the value on token rotation. Migrations 0001-0006 are not edited.
+- Deploy order: the app may ship first. Every reader treats "table missing / any error / no row" as 30 and never fails a poll
+  (`getListenMinutes`, `listListenMinutes` never throw). Until the migration is applied the dashboard cannot save (fixed error text).
+
+### 21.2 `lib/agentSettings.ts`
+`LISTEN_MIN=0`, `LISTEN_MAX=60`, `LISTEN_DEFAULT=30`.
+- `parseListenMinutes(v: unknown): number | null` integer 0..60 as number or digit string, else null.
+- `getListenMinutes(agent, deviceId | null): Promise<number>` never throws; no device id, no row, any error -> 30.
+- `setListenMinutes(agent, deviceId, minutes): Promise<number>` invalid -> `ApiError(422, VALIDATION)`; upsert on `(agent, device_id)`; DB error throws.
+- `listListenMinutes(deviceIds): Promise<Map<string, number>>` key `${agent}:${deviceId}`, existing rows only, never throws.
+- Client-safe mirror `lib/dash/listen.ts` (`UI_MIN/UI_MAX/UI_DEFAULT`, `LISTEN_AGENTS` = claude, codex; `listenLabel`, `sliderMinutes`,
+  `listenKey`); no server imports, values pinned equal by `tests/dash-listen.test.ts`.
+
+### 21.3 API surface: `listen_minutes` (integer 0..60) is added to
+- `GET /api/v1/tasks?mine=1...` (`listTasks`; only with `mine`, and not on the `dispatch_paused` path, which stays `{tasks:[], dispatch_paused:true}`);
+- `GET /api/v1/inbox` JSON form (not the `?format=text` body);
+- the heartbeat result (`{ok, at, lease_renewed, flags, listen_minutes}`).
+The identity is the caller's `(agent, deviceId)`; a token without a device gets 30. The hook reads it with `sed` from the tasks poll body.
+
+### 21.4 Dashboard
+`/dashboard/devices`, Identities table, column "Listen / wait": range input 0-60 step 1 with live label ("Off" at 0, else "N min") for
+claude and codex identities (hermes, grok: no slider, no hooks). Server action `setListenMinutesAction` (`app/dashboard/devices/actions.ts`):
+`requireAdmin()`, `parseListenForm` (agent allow-list, uuid device id, integer 0..60; the client range is a convenience only),
+`setListenMinutes`, admin log `listen_minutes_set`, `revalidatePath`. Errors return fixed texts; nothing from the request is echoed.
+Page load: `loadListenMinutes` (never throws; missing row shows the default 30).
+
+### 21.5 `linger.sh` modes (`lib/scripts/lingerSh.ts` -> `~/.agency-board/linger.sh`; one script, one Stop hook, never two parallel Stop hooks)
+- `arm <claude|codex> <listen|wait> [session-id]` (run by the slash command, not a hook, no stdin). State dir `~/.agency-board/listen/`
+  (700). State file `<agent>-<sid>` (sid reduced to `[A-Za-z0-9_-]`, max 80) holds `mode=`, `ts=`, `seen=`, `blk=`. No usable sid (empty,
+  literal unsubstituted placeholder, Codex has none): writes `<agent>-pending`; the next `stop` of that agent with a pending file < 300 s old
+  binds it to its own `session_id`. Polls `tasks?mine=1&status=open` for `listen_minutes`: 0 -> arms nothing, prints the OFF message, exit 0;
+  server unreachable -> arms with 30 and says so. Prints one status line (Claude Code injects stdout into the command).
+- `disarm <claude|codex> [sid]` removes the session state and pending; without a sid, every state file of that agent on this machine.
+- `interrupt <claude|codex>` (Codex `Interrupt` hook, `session_id` from stdin): disarm for that session, silent. Documented event, untested.
+- `stop <agent>`: armed session (state or bound pending) -> listen loop, otherwise the unchanged marker linger (§7, docs/connect.md section 10).
+  Open-ended (no deadline): poll at once, then sleep `listen_minutes * AGENCY_BOARD_LISTEN_UNIT` seconds (unit default 60; tests set 1); `listen_minutes` is
+  re-read from every poll body, so a slider change applies to the next sleep; 0 -> remove state, log `off by dashboard slider`, exit 0 silently.
+  Sleep chunks of `AGENCY_BOARD_LISTEN_TICK` s (default 5) re-check the state file (gone = exit 0). `trap TERM INT HUP` (Esc) removes the state.
+  - listen: new open task(s) handed to me -> `{"decision":"block","reason":...}` with the linger text (claim and work per R2/R9/R10, titles untrusted R1).
+    Guard: an id that already blocked 3 times and is still open is skipped (`blk=`).
+  - wait: same trigger, but the reason says tell your user now and do NOT claim or work (R2, R3), plus `systemMessage`. Announced ids and alert keys are
+    stored in `seen=` and not announced again.
+  - `stale_alerts` (§20) printed in both modes. Stop conditions: HTTP 401/403, `dispatch_paused:true`, 3 failures in a row -> exit 0, state stays armed.
+  - Log lines `listen[<agent> <sid8>] ...` in `~/.agency-board/linger.log` (ids and counts only).
+- Stop hook timeout 86400 (was 1900); `connect.sh` raises an existing lower `linger.sh` Stop timeout (upgrade path: re-run `connect.sh --hooks-only`).
+
+### 21.6 Install (`lib/scripts/connectSh.ts`, also `--hooks-only`)
+- Claude: `~/.claude/commands/{listen,wait,unlisten}.md`; frontmatter `description`, `disable-model-invocation: true`,
+  `allowed-tools: Bash(sh ~/.agency-board/linger.sh:*)`; marker line `<!-- agency-board:commands v1 -->` after the frontmatter (a file without it is
+  not overwritten, warning); a `!` line runs `sh ~/.agency-board/linger.sh arm claude <mode> "${CLAUDE_SESSION_ID}"` (`disarm` for unlisten). Arguments ignored.
+- Codex (only with a codex token and `~/.codex`; untested, no Codex CLI here): `~/.codex/prompts/{listen,wait,unlisten}.md` (custom prompts,
+  `/prompts:listen`, deprecated by OpenAI) and `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (`$listen` / `/skills`); both run
+  `sh ~/.agency-board/linger.sh arm codex <mode>` (no sid: pending binding). `~/.codex/hooks.json` also gets the `Interrupt` hook.
+- `connect.ps1`: not covered. No changes to `lib/guide.ts` (guide `CHAR_CAP` stays 8000).
+- Sources: https://developers.openai.com/codex/custom-prompts , https://developers.openai.com/codex/hooks ,
+  https://developers.openai.com/codex/build-skills , https://code.claude.com/docs/en/skills .
