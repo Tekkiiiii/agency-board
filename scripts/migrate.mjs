@@ -6,7 +6,11 @@
 //   AGENCY_BOARD_DB_URL      Postgres connection string (Supabase: Project Settings > Database > Connection string,
 //                            use the direct or session-pooler URL, not the transaction pooler: migrations need a
 //                            session for the advisory lock). Unset = this script does nothing.
-//   AGENCY_BOARD_DB_SSL_CA   optional PEM of the CA that signed the server certificate; enables full TLS verification.
+//   AGENCY_BOARD_DB_SSL_CA   optional PEM of the CA that signed the server certificate. For every non-local host the
+//                            server certificate is ALWAYS verified: against Supabase's public root CAs bundled in
+//                            scripts/certs/supabase-ca.pem by default, or against this PEM when set (it replaces the
+//                            bundle). Needed only for a non-Supabase host or a custom domain. Verification cannot be
+//                            turned off by any setting.
 //   VERCEL_ENV               set by Vercel. Anything but "production" (preview, development) skips: previews must
 //                            never touch the production database. Unset (local, CI) runs.
 //
@@ -19,7 +23,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
-const DEFAULT_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "supabase", "migrations");
+const HERE = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DIR = join(HERE, "..", "supabase", "migrations");
+const BUNDLED_CA_PATH = join(HERE, "certs", "supabase-ca.pem");
+const CERT_MARKER = "-----BEGIN CERTIFICATE-----";
+// Node/OpenSSL error codes that mean "the server certificate was not accepted" (as opposed to refused auth, DNS, timeout...).
+const CERT_ERROR_CODES = new Set([
+  "SELF_SIGNED_CERT_IN_CHAIN", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID", "CERT_UNTRUSTED", "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
 const NAME_RE = /^(\d{14})_(.*)\.sql$/;
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 // Arbitrary constant; every runner of this script takes the same session-level advisory lock.
@@ -50,6 +62,11 @@ function secretsOf(dbUrl) {
   return secrets;
 }
 
+function isCertError(e) {
+  const code = e?.code;
+  return typeof code === "string" && /^[A-Z0-9_]+$/.test(code) && (CERT_ERROR_CODES.has(code) || code.startsWith("ERR_TLS_CERT"));
+}
+
 function safeDecode(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
@@ -59,7 +76,7 @@ function safeDecode(s) {
  * not override the TLS decision below, and pg never holds the whole URL to echo in an error.
  * Throws a generic error (no URL text) when the URL is not usable.
  */
-export function buildConnectionConfig(dbUrl, env = process.env) {
+export function buildConnectionConfig(dbUrl, env = process.env, bundledCaPath = BUNDLED_CA_PATH) {
   let u;
   try { u = new URL(dbUrl); } catch { throw new Error("AGENCY_BOARD_DB_URL is not a valid connection URL"); }
   if (u.protocol !== "postgres:" && u.protocol !== "postgresql:") throw new Error("AGENCY_BOARD_DB_URL must start with postgresql://");
@@ -76,15 +93,34 @@ export function buildConnectionConfig(dbUrl, env = process.env) {
     connectionTimeoutMillis: 30_000,
   };
   if (LOCAL_HOSTS.has(host)) return config; // local stack / docker: no TLS
-  // Any other host: TLS is always on. Without AGENCY_BOARD_DB_SSL_CA the server certificate is NOT verified
-  // (rejectUnauthorized:false), so an on-path attacker between the build machine and the database can terminate TLS and
-  // run arbitrary SQL as the database owner (SCRAM protects the password, not the session). The default exists because Supabase's certificate chain is not in
-  // Node's trust store, so verifying by default would fail every first build. Recommended: set AGENCY_BOARD_DB_SSL_CA to
-  // the PEM of the provider's CA (Supabase publishes it in the dashboard under Database settings, SSL configuration) to
-  // get full verification.
-  const ca = env.AGENCY_BOARD_DB_SSL_CA?.trim();
-  config.ssl = ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false };
+  // Any other host: TLS is always on and the server certificate is always verified (rejectUnauthorized:true). The trust
+  // anchor is AGENCY_BOARD_DB_SSL_CA when set (it replaces the bundle), else the Supabase roots bundled in the repo
+  // (Supabase's chain is not in Node's trust store). A missing or unusable anchor throws: there is no unverified
+  // fallback and no setting that turns verification off, so an on-path attacker cannot terminate TLS and run SQL as the
+  // database owner. Not even `?sslmode=` in the URL is read.
+  config.ssl = { ca: overrideCa(env) ?? loadBundledCa(bundledCaPath), rejectUnauthorized: true };
   return config;
+}
+
+/**
+ * The AGENCY_BOARD_DB_SSL_CA override, normalised: trimmed, whitespace-only counts as unset (null), literal two-character
+ * "\n" sequences become newlines when the value has no real newline (one-line env values). Throws, without echoing the
+ * value, when it holds no certificate: a typo must not silently fall back to another trust anchor.
+ */
+function overrideCa(env) {
+  let ca = env.AGENCY_BOARD_DB_SSL_CA?.trim();
+  if (!ca) return null;
+  if (!ca.includes("\n") && ca.includes("\\n")) ca = ca.replace(/\\n/g, "\n");
+  if (!ca.includes(CERT_MARKER)) throw new Error(`AGENCY_BOARD_DB_SSL_CA does not contain a PEM certificate (expected ${CERT_MARKER}); unset it to use the bundled Supabase CA`);
+  return ca;
+}
+
+/** The bundled Supabase root CAs (PEM text, comment header included). Throws when unreadable: never falls back to unverified. */
+export function loadBundledCa(path = BUNDLED_CA_PATH) {
+  let pem;
+  try { pem = readFileSync(path, "utf8"); } catch { throw new Error("the bundled Supabase CA certificate file (scripts/certs/supabase-ca.pem) could not be read; restore it from the repository"); }
+  if (!pem.includes(CERT_MARKER)) throw new Error("the bundled Supabase CA certificate file (scripts/certs/supabase-ca.pem) contains no certificate; restore it from the repository");
+  return pem;
 }
 
 /**
@@ -134,9 +170,8 @@ export async function runMigrations({
     log("migrate: no migration files found, nothing to apply");
     return { exitCode: 0, applied: 0 };
   }
-  if (config.ssl && config.ssl.rejectUnauthorized === false) {
-    log("migrate: TLS without certificate verification; set AGENCY_BOARD_DB_SSL_CA for full verification");
-  }
+  const anchor = config.ssl ? (env.AGENCY_BOARD_DB_SSL_CA?.trim() ? "AGENCY_BOARD_DB_SSL_CA" : "the bundled Supabase CA") : "";
+  if (anchor) log(`migrate: verifying the database certificate against ${anchor}`);
 
   const client = createClient(config);
   client.on?.("error", () => { /* idle-connection errors surface on the next query; never crash with the driver's text */ });
@@ -180,6 +215,16 @@ export async function runMigrations({
     log(applied ? `migrate: applied ${applied} migration(s)` : "migrate: up to date, 0 migrations to apply");
     return { exitCode: 0, applied };
   } catch (e) {
+    if (!connected && isCertError(e)) {
+      // Built from the error code only: the driver text (ERR_TLS_CERT_ALTNAME_INVALID) carries the host name.
+      logError(
+        `migrate: FAILED ${current}: TLS certificate verification failed (${e.code}). The database certificate is not signed by ` +
+          `${anchor === "AGENCY_BOARD_DB_SSL_CA" ? "the CA in AGENCY_BOARD_DB_SSL_CA" : "the bundled Supabase CA"}, or the host name does not match it. ` +
+          "If your database is not hosted on Supabase (or uses a custom domain), set AGENCY_BOARD_DB_SSL_CA to your provider's CA certificate (PEM). " +
+          "Verification cannot be turned off.",
+      );
+      return { exitCode: 1, applied, failed: current };
+    }
     return { ...fail(current, e), applied };
   } finally {
     if (connected) {

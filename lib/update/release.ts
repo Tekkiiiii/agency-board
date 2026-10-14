@@ -1,9 +1,10 @@
-// Upstream release + migration lookup for the in-app Update button (server-side only).
-// Every call is an unauthenticated GET to the literal host https://api.github.com (no Authorization header, ever: the
-// 60 req/h anonymous limit is why results are cached). Nothing from a response is ever used as a URL, host or header;
-// any shape anomaly returns null, which the caller treats as "no update" (fail silent).
+// Upstream release, release-tag and migration lookup for the in-app Update button (server-side only).
+// Every cached call is an unauthenticated GET to the literal host https://api.github.com (no Authorization header: the
+// 60 req/h anonymous limit is why results are cached). The one exception is resolveTagCommit with an explicit token,
+// which only lib/update/sync.ts passes at sync time (never cached, never logged). Nothing from a response is ever used
+// as a URL, host or header; any shape anomaly returns null / unavailable, which the caller treats as "unknown".
 
-import { apiUrl, GITHUB_API_VERSION, repoPath, resolveUpstream } from "./config";
+import { apiUrl, GITHUB_API_VERSION, isValidRepo, repoPath, resolveUpstream } from "./config";
 import { parseSemver } from "./version";
 
 type Env = Record<string, string | undefined>;
@@ -58,28 +59,40 @@ function cached<T>(key: string, now: () => number, ttlMs: number, load: () => Pr
 
 // ---- transport ----
 
-async function getJson(path: string, doFetch: FetchLike): Promise<unknown> {
+type Fetched = { status: number; json: unknown; limited: boolean };
+
+// One GET to a validated api.github.com path. Resolves with the status and the parsed JSON body (undefined unless the
+// status is 200 and the body is small, valid JSON). Never surfaces a raw body. `token` adds the Authorization header.
+async function request(path: string, doFetch: FetchLike, token?: string): Promise<Fetched> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "agency-board-update-check",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await doFetch(apiUrl(path), {
     method: "GET",
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "agency-board-update-check",
-      "X-GitHub-Api-Version": GITHUB_API_VERSION,
-    },
+    headers,
     redirect: "error",
     cache: "no-store",
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  if (res.status !== 200) return null;
+  const limited = res.status === 429 || res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after");
+  if (res.status !== 200) return { status: res.status, json: undefined, limited };
   const declared = Number(res.headers.get("content-length"));
-  if (declared > MAX_RESPONSE_CHARS) return null;
+  if (declared > MAX_RESPONSE_CHARS) return { status: 200, json: undefined, limited };
   const text = await res.text();
-  if (text.length > MAX_RESPONSE_CHARS) return null;
+  if (text.length > MAX_RESPONSE_CHARS) return { status: 200, json: undefined, limited };
   try {
-    return JSON.parse(text);
+    return { status: 200, json: JSON.parse(text), limited };
   } catch {
-    return null;
+    return { status: 200, json: undefined, limited };
   }
+}
+
+async function getJson(path: string, doFetch: FetchLike): Promise<unknown> {
+  const r = await request(path, doFetch);
+  return r.status === 200 && r.json !== undefined ? r.json : null;
 }
 
 // ---- validation ----
@@ -138,15 +151,69 @@ export async function fetchLatestRelease(opts: LookupOptions = {}): Promise<Late
   );
 }
 
-// Sorted, de-duplicated 14-digit migration versions on the upstream DEFAULT BRANCH HEAD (no ref query: that is what
-// POST merge-upstream merges, not the release tag); null when unknown.
-export async function fetchMigrationVersions(opts: LookupOptions = {}): Promise<string[] | null> {
+const SHA_RE = /^[0-9a-f]{40}$/;
+const MAX_DEREF = 3; // lightweight tag = 0 hops; an annotated tag pointing at another tag is followed this many times
+
+export type TagCommitResult =
+  | { ok: true; sha: string }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "unavailable"; status?: number; limited?: true };
+
+const unavailable = (r?: Fetched): TagCommitResult => ({
+  ok: false,
+  reason: "unavailable",
+  ...(r && r.status !== 200 ? { status: r.status } : {}),
+  ...(r && r.limited ? { limited: true as const } : {}),
+});
+
+// Resolves a release tag on `upstream` to the 40-hex commit it points to (uncached). GET git/ref/tags/<tag>, then for
+// an annotated tag GET git/tags/<sha> up to MAX_DEREF times. 404 on the ref = the tag does not exist (not_found);
+// every other failure or shape anomaly = unavailable. `token` is only for sync time (higher rate limit than 60/h) and
+// goes to api.github.com only, like every URL built here.
+export async function resolveTagCommit(opts: { upstream: string; tag: string; fetch?: FetchLike; token?: string }): Promise<TagCommitResult> {
+  const { upstream, tag, token } = opts;
+  if (!isValidRepo(upstream) || !isPlainTag(tag)) return unavailable();
+  const doFetch = opts.fetch ?? globalThis.fetch;
+  try {
+    const first = await request(`${repoPath(upstream)}/git/ref/tags/${encodeURIComponent(tag)}`, doFetch, token);
+    if (first.status === 404) return { ok: false, reason: "not_found" };
+    if (first.status !== 200 || !isObject(first.json)) return unavailable(first);
+    if (first.json.ref !== `refs/tags/${tag}`) return unavailable();
+    let obj = first.json.object;
+    for (let hop = 0; ; hop++) {
+      if (!isObject(obj) || typeof obj.sha !== "string" || !SHA_RE.test(obj.sha)) return unavailable();
+      if (obj.type === "commit") return { ok: true, sha: obj.sha };
+      if (obj.type !== "tag" || hop >= MAX_DEREF) return unavailable();
+      const next = await request(`${repoPath(upstream)}/git/tags/${obj.sha}`, doFetch, token);
+      if (next.status !== 200 || !isObject(next.json)) return unavailable(next);
+      obj = next.json.object;
+    }
+  } catch {
+    return unavailable();
+  }
+}
+
+// Cached, unauthenticated wrapper (key tagsha:<upstream>:<tag>): the commit sha of the release tag; null when unknown.
+export async function fetchTagCommit(opts: LookupOptions & { tag: string }): Promise<string | null> {
   const upstream = resolveUpstream(opts.env ?? process.env);
   if (!upstream) return null;
+  const now = opts.now ?? Date.now;
+  return cached(`tagsha:${upstream.toLowerCase()}:${opts.tag}`, now, opts.ttlMs ?? DEFAULT_TTL_MS, async () => {
+    const r = await resolveTagCommit({ upstream, tag: opts.tag, fetch: opts.fetch });
+    return r.ok ? r.sha : null;
+  });
+}
+
+// Sorted, de-duplicated 14-digit migration versions in supabase/migrations at the given upstream commit (the release
+// tag's commit, which is what the sync merges); null when unknown.
+export async function fetchMigrationVersions(opts: LookupOptions & { sha: string }): Promise<string[] | null> {
+  const upstream = resolveUpstream(opts.env ?? process.env);
+  if (!upstream || !SHA_RE.test(opts.sha)) return null;
   const doFetch = opts.fetch ?? globalThis.fetch;
   const now = opts.now ?? Date.now;
-  return cached(`migrations:${upstream.toLowerCase()}:head`, now, opts.ttlMs ?? DEFAULT_TTL_MS, async () => {
-    const raw = await getJson(`${repoPath(upstream)}/contents/supabase/migrations`, doFetch);
+  const sha = opts.sha;
+  return cached(`migrations:${upstream.toLowerCase()}:${sha}`, now, opts.ttlMs ?? DEFAULT_TTL_MS, async () => {
+    const raw = await getJson(`${repoPath(upstream)}/contents/supabase/migrations?ref=${sha}`, doFetch);
     if (!Array.isArray(raw)) return null;
     const versions = new Set<string>();
     for (const item of raw) {
@@ -166,13 +233,16 @@ export function bundledMigrations(): string[] | null {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-// Upstream default-branch versions the running app does not have yet; null = unknown.
+// Versions in the release TAG's tree that the running app does not have yet; null = unknown (tag unresolved, listing
+// failed, or no bundled list). Never falls back to the default branch.
 export async function pendingMigrationCount(
-  opts: LookupOptions & { bundled?: readonly string[] | null } = {},
+  opts: LookupOptions & { tag: string; bundled?: readonly string[] | null },
 ): Promise<number | null> {
   const bundled = opts.bundled !== undefined ? opts.bundled : bundledMigrations();
   if (!bundled) return null;
-  const upstream = await fetchMigrationVersions(opts);
+  const sha = await fetchTagCommit(opts);
+  if (!sha) return null;
+  const upstream = await fetchMigrationVersions({ ...opts, sha });
   if (!upstream) return null;
   const have = new Set(bundled);
   return upstream.filter((v) => !have.has(v)).length;

@@ -31,7 +31,7 @@ vi.mock("../lib/db", () => ({ db: () => ({ rpc: (fn: string, args: Record<string
 
 import { DEFAULT_UPSTREAM } from "../lib/update/config";
 import { __resetCacheForTests } from "../lib/update/release";
-import { SYNC_OK_MESSAGE } from "../lib/update/sync";
+import { SYNC_OK_MESSAGE, syncUpToDateMessage } from "../lib/update/sync";
 import type { UpdateStatus } from "../lib/update/status";
 import { UpdateBanner } from "../app/dashboard/_components/UpdateBanner";
 import { syncUpdateAction } from "../app/dashboard/update/actions";
@@ -45,16 +45,18 @@ const FORK = "me/my-board";
 const AVAILABLE: Extract<UpdateStatus, { state: "available" }> = {
   state: "available",
   latest: "1.2.0",
+  tag: "v1.2.0",
   current: "1.1.0",
   notes: "Adds the update button.\nFixes a typo.",
   url: `https://github.com/${UP}/releases/tag/v1.2.0`,
   migrations: 2,
   fork: FORK,
-  manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP.split("/")[0]}:main`,
+  manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP.split("/")[0]}:v1.2.0`,
 };
 const SETUP: Extract<UpdateStatus, { state: "setup" }> = {
   state: "setup",
   latest: "1.2.0",
+  tag: "v1.2.0",
   current: "1.1.0",
   url: AVAILABLE.url,
   manualSyncUrl: AVAILABLE.manualSyncUrl,
@@ -126,8 +128,13 @@ describe("UpdateBanner", () => {
 
 type Call = { url: string; init: RequestInit };
 let calls: Call[] = [];
-let syncStatus = 200;
+let syncStatus = 201;
 let syncBody = "";
+const TAG_SHA = "22d924701a6ae2e4cd01e9a15bbaf3946094af65";
+const MOVED_SHA = "9999999999999999999999999999999999999999";
+let refStatus = 200;
+let tagMovesAfterFirstLookup = false;
+let refLookups = 0;
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 function stubGithub() {
@@ -146,14 +153,23 @@ function stubGithub() {
         prerelease: false,
       });
     }
+    if (url.includes("/git/ref/tags/")) {
+      refLookups += 1;
+      if (refStatus !== 200) return json({ message: "Not Found" }, refStatus);
+      const sha = tagMovesAfterFirstLookup && refLookups > 1 ? MOVED_SHA : TAG_SHA;
+      return json({ ref: "refs/tags/v1.2.0", object: { sha, type: "commit" } });
+    }
     if (url.includes("/contents/supabase/migrations")) return json([{ name: "20261020000008_x.sql", type: "file" }]);
-    if (url.endsWith("/merge-upstream")) return new Response(syncBody || JSON.stringify({ message: `echo ${TOKEN}` }), { status: syncStatus });
+    if (url.endsWith("/merges") && init?.method === "POST") {
+      const body = syncBody || JSON.stringify({ message: `echo ${TOKEN}` });
+      return new Response(syncStatus === 204 ? null : body, { status: syncStatus });
+    }
     return json({}, 404);
   });
   vi.stubGlobal("fetch", fn);
   return fn;
 }
-const syncCalls = () => calls.filter((c) => c.url.endsWith("/merge-upstream"));
+const syncCalls = () => calls.filter((c) => c.url.endsWith("/merges") && c.init.method === "POST");
 
 function form(m: Record<string, string>): FormData {
   const fd = new FormData();
@@ -186,8 +202,11 @@ beforeEach(() => {
   });
   headersFn.mockClear();
   reqHeaders = new Headers({ host: "board.example.test", origin: "https://board.example.test", "sec-fetch-site": "same-origin" });
-  syncStatus = 200;
+  syncStatus = 201;
   syncBody = "";
+  refStatus = 200;
+  tagMovesAfterFirstLookup = false;
+  refLookups = 0;
   vi.stubEnv("AGENCY_BOARD_VERSION", "1.1.0");
   vi.stubEnv("AGENCY_BOARD_MIGRATIONS", "");
   vi.stubEnv("AGENCY_BOARD_GITHUB_TOKEN", TOKEN);
@@ -280,21 +299,21 @@ describe("syncUpdateAction: rate limit", () => {
 });
 
 describe("syncUpdateAction: re-derives the decision server side", () => {
-  it("status not available (no newer release) -> ok:false without calling merge-upstream", async () => {
+  it("status not available (no newer release) -> ok:false without merging", async () => {
     vi.stubEnv("AGENCY_BOARD_VERSION", "1.2.0");
     const r = await syncUpdateAction();
     expect(r.ok).toBe(false);
     expect(syncCalls()).toHaveLength(0);
   });
 
-  it("status setup (no token) -> ok:false without calling merge-upstream", async () => {
+  it("status setup (no token) -> ok:false without merging", async () => {
     vi.stubEnv("AGENCY_BOARD_GITHUB_TOKEN", "");
     const r = await syncUpdateAction();
     expect(r.ok).toBe(false);
     expect(syncCalls()).toHaveLength(0);
   });
 
-  it("status hidden (GitHub unreachable) -> ok:false without calling merge-upstream", async () => {
+  it("status hidden (GitHub unreachable) -> ok:false without merging", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({}, 500)));
     const r = await syncUpdateAction();
     expect(r.ok).toBe(false);
@@ -308,9 +327,10 @@ describe("syncUpdateAction: success path", () => {
     expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE });
     const s = syncCalls();
     expect(s).toHaveLength(1);
-    expect(s[0].url).toBe(`https://api.github.com/repos/${FORK}/merge-upstream`);
+    expect(s[0].url).toBe(`https://api.github.com/repos/${FORK}/merges`);
     expect(s[0].init.method).toBe("POST");
-    expect(JSON.parse(String(s[0].init.body))).toEqual({ branch: "release" });
+    expect(JSON.parse(String(s[0].init.body))).toEqual({ base: "release", head: TAG_SHA, commit_message: "Update to v1.2.0" });
+    expect(calls.some((c) => c.url.includes("merge-upstream"))).toBe(false);
     expect((s[0].init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
     expect(logAdminAction).toHaveBeenCalledWith("update_sync", 200);
     expect(revalidatePath).toHaveBeenCalledWith("/dashboard", "layout");
@@ -330,11 +350,32 @@ describe("syncUpdateAction: success path", () => {
     expect(r.ok).toBe(true);
     const s = syncCalls();
     expect(s).toHaveLength(1);
-    expect(s[0].url).toBe(`https://api.github.com/repos/${FORK}/merge-upstream`);
-    expect(JSON.parse(String(s[0].init.body))).toEqual({ branch: "main" });
+    expect(s[0].url).toBe(`https://api.github.com/repos/${FORK}/merges`);
+    expect(JSON.parse(String(s[0].init.body))).toEqual({ base: "main", head: TAG_SHA, commit_message: "Update to v1.2.0" });
     const hdr = s[0].init.headers as Record<string, string>;
     expect(hdr.Authorization).toBe(`Bearer ${TOKEN}`);
     expect(JSON.stringify(calls)).not.toMatch(/attacker|evil/);
+  });
+});
+
+describe("syncUpdateAction: tag handling", () => {
+  it("passes the status tag and the resolved upstream, and merges the freshly resolved sha when the tag moved after the status check", async () => {
+    tagMovesAfterFirstLookup = true; // 1st lookup (status, cached) = TAG_SHA, 2nd (sync, fresh) = MOVED_SHA
+    const r = await syncUpdateAction();
+    expect(r.ok).toBe(true);
+    const s = syncCalls();
+    expect(s).toHaveLength(1);
+    expect(JSON.parse(String(s[0].init.body)).head).toBe(MOVED_SHA);
+    expect(calls.filter((c) => c.url.includes("/git/ref/tags/v1.2.0"))).toHaveLength(2);
+  });
+
+  it("already contains the tag (204) -> ok:true with the up-to-date message, audited 200, layout revalidated", async () => {
+    syncStatus = 204;
+    const r = await syncUpdateAction();
+    expect(r).toEqual({ ok: true, message: syncUpToDateMessage("v1.2.0") });
+    expect(r.message).not.toBe(SYNC_OK_MESSAGE);
+    expect(logAdminAction).toHaveBeenCalledWith("update_sync", 200);
+    expect(revalidatePath).toHaveBeenCalledWith("/dashboard", "layout");
   });
 });
 
@@ -349,12 +390,43 @@ describe("syncUpdateAction: failures map to fixed messages and leak nothing", ()
     expect(revalidatePath).not.toHaveBeenCalledWith("/dashboard", "layout");
   });
 
-  it("422 -> diverged message, audited 422", async () => {
+  it("422 -> unreachable message (manual sync link), audited 422", async () => {
     syncStatus = 422;
     const r = await syncUpdateAction();
     expect(r.ok).toBe(false);
-    expect(r.message).toMatch(/diverged/i);
+    expect(r.message).toMatch(/could not merge the release commit/i);
+    expect(r.message).toMatch(/manual sync link/i);
+    expect(r.message).not.toMatch(/diverged/i);
     expect(logAdminAction).toHaveBeenCalledWith("update_sync", 422);
+  });
+
+  it("404 'Head does not exist' -> unreachable message, audited 422", async () => {
+    syncStatus = 404;
+    syncBody = JSON.stringify({ message: "Head does not exist" });
+    const r = await syncUpdateAction();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/could not merge the release commit/i);
+    expect(logAdminAction).toHaveBeenCalledWith("update_sync", 422);
+  });
+
+  it("404 on the merge (base/fork missing) -> not found message, audited 404", async () => {
+    syncStatus = 404;
+    syncBody = JSON.stringify({ message: "Base does not exist" });
+    const r = await syncUpdateAction();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/fork or the branch/i);
+    expect(logAdminAction).toHaveBeenCalledWith("update_sync", 404);
+  });
+
+  it("release tag gone at sync time -> tag_not_found message, audited 404, no merge call", async () => {
+    // The status check tolerates an unresolvable tag (migrations unknown); the sync resolves it fresh and refuses.
+    refStatus = 404;
+    const r = await syncUpdateAction();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/release tag was not found/i);
+    expect(syncCalls()).toHaveLength(0);
+    expect(logAdminAction).toHaveBeenCalledWith("update_sync", 404);
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it("401 / 404 / 500 are ok:false with fixed text", async () => {
@@ -368,7 +440,7 @@ describe("syncUpdateAction: failures map to fixed messages and leak nothing", ()
 
   it("the token never appears in any result, console output or audit call (GitHub echoing it back included)", async () => {
     const results: unknown[] = [];
-    for (const st of [200, 401, 403, 404, 409, 422, 429, 500]) {
+    for (const st of [201, 204, 401, 403, 404, 409, 422, 429, 500]) {
       syncStatus = st;
       syncBody = JSON.stringify({ message: `Bad credentials ${TOKEN}`, token: TOKEN });
       results.push(await syncUpdateAction());

@@ -129,9 +129,9 @@ The dashboard can update your deployment for you. When the upstream project publ
 ### What the button does
 
 - **When it shows.** Only in an admin dashboard session. It stays hidden unless the latest GitHub Release of the upstream repo is newer than the `version` in your running `package.json`. If the check fails for any reason, nothing is shown.
-- **Before you confirm.** The banner shows the release notes and how many database migrations will apply. The count is taken from upstream's default branch, because that is what the sync merges, not from the release tag. If the count cannot be worked out it says "Pending migration count unknown". The confirm dialog repeats the count and says that it syncs your fork on GitHub and that Vercel then redeploys.
-- **On confirm.** The server calls GitHub's "sync fork" API (`POST /repos/{owner}/{repo}/merge-upstream`) on your fork, with your token. That merges the upstream default branch into your fork's branch. Vercel sees the new commit and redeploys. During that build, `npm run build` first applies the new migrations to your database (the `prebuild` step runs `scripts/migrate.mjs`).
-- **Nothing is forced.** If GitHub reports a merge conflict (409) or a diverged fork (422), the dashboard shows a clear error and the banner keeps a "Sync manually instead" link to GitHub's compare page. The app never force-pushes and never retries.
+- **Before you confirm.** The banner shows the release notes and how many database migrations will apply. The count is taken from the release tag's tree (the commit the tag points to), which is exactly what the sync merges, not from upstream's default branch. If the count cannot be worked out it says "Pending migration count unknown". The confirm dialog repeats the count and says that it syncs your fork on GitHub and that Vercel then redeploys.
+- **On confirm.** The server resolves the release tag to the commit it points to on upstream (looked up again at that moment, so if the tag was moved after the dashboard loaded, the commit merged is the tag's current target, which can differ from the release notes and migration count the banner showed; the app does not compare the two). It then calls GitHub's merge API (`POST /repos/{owner}/{repo}/merges`) on your fork with your token, with your fork's branch as `base` and that commit's SHA as `head`. Only the release commit and the history behind it that your fork lacks are merged, never the branch head. This creates a merge commit on your branch, and upstream's `main` is never merged. Vercel sees the new commit and redeploys. During that build, `npm run build` first applies the new migrations to your database (the `prebuild` step runs `scripts/migrate.mjs`).
+- **Nothing is forced.** If GitHub reports a merge conflict (409), the dashboard shows a clear error. If GitHub cannot find or accept the release commit in your fork (a 404 "Head does not exist" or a 422), it says the commit is not reachable from your fork. In both cases the banner keeps a "Sync manually instead" link, which opens GitHub's compare page for your branch against the release tag. If the release tag no longer exists on upstream, the dashboard says so and changes nothing. If your fork already contains the release (GitHub answers 204), the dashboard says there is nothing to merge; the banner then clears once Vercel finishes deploying. The app never force-pushes and never retries.
 - **Guard rails.** The action re-checks the admin session, a same-origin check and a rate limit (3 attempts per minute) on the server, and works out the fork, branch and token from server environment variables only. Nothing is taken from the request.
 
 ### Setup
@@ -155,7 +155,7 @@ The fork to sync is resolved on the server, never from a request:
 
 If the fork is the upstream repo itself, there is nothing to sync and the button stays hidden. An invalid `AGENCY_BOARD_FORK` is ignored with a log line that names the variable, not its value.
 
-GitHub's merge-upstream merges the fork's GitHub **parent**, not `AGENCY_BOARD_UPSTREAM`. If your repo is a fork of a fork, or you override `AGENCY_BOARD_UPSTREAM`, the release shown may not come from the repo that gets merged. Leave `AGENCY_BOARD_UPSTREAM` at its default for the standard setup.
+The merge takes the release commit from `AGENCY_BOARD_UPSTREAM`, so that commit must be in your fork's GitHub network. That holds when your fork descends from the upstream repository's network. If your repo is a fork of a fork, or you point `AGENCY_BOARD_UPSTREAM` at a repo that is not in your fork's network, GitHub cannot find the commit and you get the "not reachable from your fork" message; use the manual sync link then. Leave `AGENCY_BOARD_UPSTREAM` at its default for the standard setup.
 
 Other optional settings:
 
@@ -163,35 +163,41 @@ Other optional settings:
 |---|---|---|
 | `AGENCY_BOARD_UPDATE_BRANCH` | `main` | Branch of your fork that is synced. It must be the branch Vercel treats as the Production Branch. Otherwise the sync builds as a preview, `VERCEL_ENV` is not `production`, migrations are skipped and the new code ships against an unmigrated database. |
 | `AGENCY_BOARD_UPSTREAM` | `Tekkiiiii/agency-board` | Repo whose releases count as updates. Advanced; an invalid value turns the feature off. |
-| `AGENCY_BOARD_DB_SSL_CA` | unset | PEM of the CA that signed your database certificate. Turns on full TLS verification. |
+| `AGENCY_BOARD_DB_SSL_CA` | unset | PEM of the CA that signed your database certificate. Not needed on Supabase, where the bundled Supabase CA is used. Set it for a non-Supabase host or a Supabase custom domain. It replaces the bundle. Verification stays on either way. |
 
 ### Database connection and TLS
 
-For local hosts (`127.0.0.1`, `localhost`) the runner uses no TLS. For any other host TLS is on. Without `AGENCY_BOARD_DB_SSL_CA` the server certificate is **not verified**. An on-path attacker between the build and the database could terminate TLS and run arbitrary SQL as the database owner. The runner logs a line saying so. The default exists because Supabase's certificate chain is not in Node's trust store, so verifying by default would fail every first build. Set `AGENCY_BOARD_DB_SSL_CA` to get full verification. This is recommended. Supabase publishes its CA certificate in the dashboard under Database settings, SSL configuration. The connection string, password, host and any username other than `postgres` are scrubbed from the runner's output, so a connection error does not write your project ref into build logs.
+For local hosts (`127.0.0.1`, `localhost`) the runner uses no TLS. For any other host TLS is on and the server certificate is **always verified**. There is no setting that turns this off, and a `?sslmode=` in the connection string is ignored. So an on-path attacker between the build and the database cannot terminate TLS and run SQL as the database owner.
+
+By default the certificate is checked against Supabase's public root CAs, which are bundled in the repo in `scripts/certs/supabase-ca.pem` (public certificates, no secret). The file holds two roots, both from Supabase's own CLI repository (retrieved 2026-10-14):
+
+- Supabase Root 2021 CA, valid until 2031-04-26. The Supabase pooler hosts (`aws-0-<region>.pooler.supabase.com`) chain to it, checked on 2026-10-14. Direct `db.<ref>.supabase.co` hosts were not tested.
+- The second root (its certificate subject is also named "Supabase Root 2021 CA", but it is a different key issued in 2025), valid until 2035-09-01. It is the successor root. No live host was seen on it on 2026-10-14, so today only the 2021 root is what verifies.
+
+The runner logs which trust anchor it uses. Set `AGENCY_BOARD_DB_SSL_CA` to a PEM certificate if your database is not hosted on Supabase or uses a custom domain, or if you want to replace the bundle. The value replaces the bundled roots (it is not added to them). A value that holds no `-----BEGIN CERTIFICATE-----` stops the build, and a blank value counts as unset. If the certificate does not verify, the build fails with `TLS certificate verification failed (<code>)`, which means the certificate is not signed by the trust anchor in use or the host name does not match. The connection string, password, host and any username other than `postgres` are scrubbed from the runner's output, so a connection error does not write your project ref into build logs.
 
 ### Trust boundary
 
-Turning the button on means you trust upstream's default branch with your production deployment.
+Turning the button on means you trust upstream's release tags with your production deployment. Only the commit a release tag points to is merged, never the branch head.
 
 - A synced commit runs at build time with your Production environment: `prebuild`, `next.config`, package scripts and migrations. That environment includes `AGENCY_BOARD_DB_URL` (database owner), the service role key and the GitHub token.
 - The preview guard (`VERCEL_ENV` check) is itself repo code. It is not a control against a compromised upstream.
 - Vercel has no build-only variables. `AGENCY_BOARD_DB_URL` and the GitHub token are also visible to your running functions. Keep them in the Production environment only.
 - The GitHub token can push to any branch of your fork, and a push to the production branch triggers a build with all secrets. Give it an expiry and rotate it on any suspected leak.
-- Upstream maintainers: use 2FA, branch protection and signed commits on the default branch.
-- Pinning a release tag instead of the branch head is a possible future hardening. It is not done today.
+- Residual risk: a compromised, maliciously moved or newly created release tag (including by an upstream maintainer account that can create tags) still gets code execution at your next build, with your Production environment. The app does not verify tag signatures.
+- Upstream maintainers: use 2FA, tag protection rules or rulesets so release tags cannot be moved or created by everyone, and signed tags.
 
 ### What you see when it is not set up
 
 - **No token yet (or the fork cannot be resolved).** If an update exists, the dashboard shows a one-line hint with a link to sync your fork on GitHub and a link to the release notes. There is no button. If there is no update, nothing is shown.
 - **Preview deployments never migrate.** The `prebuild` step skips when `VERCEL_ENV` is set to anything but `production`. It also skips when `AGENCY_BOARD_DB_URL` is unset. When `VERCEL_ENV` is unset (local builds, CI), it runs, so do not export `AGENCY_BOARD_DB_URL` in a shell where you build against a database you do not want migrated.
 - **A failed migration fails the build.** The failing migration is rolled back and the runner exits 1. Vercel then does not deploy, and the old version keeps serving. Migrations that already succeeded earlier in the same run stay applied.
-- **The release check is cached.** It is an unauthenticated call to the GitHub API, cached in memory for 1 hour per server instance (5 minutes after a failure), and it fails silent.
+- **The release check is cached.** These are unauthenticated calls to the GitHub API (the release, the tag's commit and the tag's migration list), cached in memory for 1 hour per server instance (5 minutes after a failure), and it fails silent.
 
 ### Caveats
 
-- **Sync merges the upstream default branch head, not the release tag.** GitHub's merge-upstream API has no tag option. So upstream's default branch must stay releasable: a fork that syncs can get commits newer than the release it was told about.
-- **Token scope.** GitHub documents Contents: write as the permission for `POST /repos/{owner}/{repo}/merge-upstream` ("Permissions required for fine-grained personal access tokens" on docs.github.com). That page does not say whether a sync that brings in changes under `.github/workflows` also needs **Workflows: Read and write**. This was not verified end to end. Add that permission only if a sync fails and the error mentions workflow files.
-- **Not tested against real GitHub.** The author has not run a real sync end to end against GitHub. The code is covered by tests with a mocked GitHub API and a local database.
+- **Token scope.** GitHub documents Contents: write as the permission for `POST /repos/{owner}/{repo}/merges` ("Permissions required for fine-grained personal access tokens" on docs.github.com). That page does not say whether a merge that brings in changes under `.github/workflows` also needs **Workflows: Read and write**. This was not verified end to end. Add that permission only if a sync fails and the error mentions workflow files. At sync time the token is also sent on the read-only tag lookups against upstream (only to `api.github.com`), for the higher rate limit.
+- **Not tested against real GitHub.** The API route was checked against GitHub's documentation and read-only probes (a fork resolves commits that exist only in upstream, and tag references resolve as described). An authenticated `POST /merges` with a commit SHA as `head` was not run end to end. The code is covered by tests with a mocked GitHub API and a local database.
 
 ### Migration policy (upstream)
 

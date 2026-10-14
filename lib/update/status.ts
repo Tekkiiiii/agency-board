@@ -10,10 +10,11 @@ import { isNewer, parseSemver, runningVersion } from "./version";
 
 export type UpdateStatus =
   | { state: "hidden" }
-  | { state: "setup"; latest: string; current: string; url: string; manualSyncUrl: string }
+  | { state: "setup"; latest: string; tag: string; current: string; url: string; manualSyncUrl: string }
   | {
       state: "available";
       latest: string;
+      tag: string; // the release tag_name (e.g. "v1.2.3"): the sync resolves it to a commit and merges only that commit
       current: string;
       notes: string;
       url: string;
@@ -48,18 +49,19 @@ async function compute(deps: StatusDeps): Promise<UpdateStatus> {
   const fork = resolveFork(env);
   if (fork && sameRepo(fork, upstream)) return HIDDEN; // running the upstream itself: there is no fork to sync
 
+  // Manual fallback = the same thing the button does: merge the release tag (not upstream's branch head) into the fork.
   const manualSyncUrl = fork
-    ? `https://github.com/${fork}/compare/${branch}...${upstream.split("/")[0]}:${branch}`
-    : `https://github.com/${upstream}`;
+    ? `https://github.com/${fork}/compare/${branch}...${upstream.split("/")[0]}:${release.tag}`
+    : `https://github.com/${upstream}/releases/tag/${release.tag}`;
 
   const token = getToken(env);
   if (!token || !fork) {
-    return { state: "setup", latest: release.version, current, url: release.url, manualSyncUrl };
+    return { state: "setup", latest: release.version, tag: release.tag, current, url: release.url, manualSyncUrl };
   }
 
-  // Counted on the upstream default branch head: that is what POST merge-upstream merges, not the release tag.
-  const migrations = await pendingMigrationCount({ fetch: deps.fetch, now: deps.now, env, bundled: deps.bundledMigrations });
-  return { state: "available", latest: release.version, current, notes: release.body, url: release.url, migrations, fork, manualSyncUrl };
+  // Counted on the release TAG's tree: that is the commit the sync merges, not upstream's branch head.
+  const migrations = await pendingMigrationCount({ tag: release.tag, fetch: deps.fetch, now: deps.now, env, bundled: deps.bundledMigrations });
+  return { state: "available", latest: release.version, tag: release.tag, current, notes: release.body, url: release.url, migrations, fork, manualSyncUrl };
 }
 
 export async function getUpdateStatus(deps: StatusDeps = {}): Promise<UpdateStatus> {
@@ -70,7 +72,7 @@ export async function getUpdateStatus(deps: StatusDeps = {}): Promise<UpdateStat
   }
 }
 
-// First-render bound for the dashboard layout: the cold lookup (two unauthenticated GitHub calls, 5 s timeout each)
+// First-render bound for the dashboard layout: the cold lookup (up to three unauthenticated GitHub calls, 5 s timeout each)
 // must never hold the page. After `ms` the banner is simply hidden; the in-flight lookup keeps going and warms the
 // cache, so the next render gets the real status. Never throws, never leaves its timer running.
 export async function getUpdateStatusWithin(ms = 1500, deps: StatusDeps = {}): Promise<UpdateStatus> {

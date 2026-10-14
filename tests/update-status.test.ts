@@ -10,6 +10,10 @@ const UP = DEFAULT_UPSTREAM;
 const UP_OWNER = UP.split("/")[0];
 const FORK = "me/my-board";
 
+const TAG_SHA = "22d924701a6ae2e4cd01e9a15bbaf3946094af65";
+const refUrl = (tag = "v1.2.0") => `https://api.github.com/repos/${UP}/git/ref/tags/${tag}`;
+const migUrl = (sha = TAG_SHA) => `https://api.github.com/repos/${UP}/contents/supabase/migrations?ref=${sha}`;
+
 const MIGS_UP = ["20261007000003", "20261008000006", "20261013000007", "20261020000008"];
 const MIGS_BUNDLED = "20261007000003,20261008000006,20261013000007";
 
@@ -40,7 +44,13 @@ function releaseBody(over: Record<string, unknown> = {}) {
 function happy(over: Record<string, unknown> = {}, migrations: string[] = MIGS_UP) {
   return fakeFetch((url) => {
     if (url.includes("/releases/latest")) return json(releaseBody(over));
-    if (url.includes("/contents/supabase/migrations")) return json(migrations.map((v) => ({ name: `${v}_x.sql`, type: "file" })));
+    const m = url.match(/\/git\/ref\/tags\/(.+)$/);
+    if (m) return json({ ref: `refs/tags/${m[1]}`, object: { sha: TAG_SHA, type: "commit" } });
+    if (url.includes("/contents/supabase/migrations")) {
+      // Only the tag's tree is answered; a default-branch listing (no ?ref=) gets a different, wrong list.
+      if (!url.endsWith(`?ref=${TAG_SHA}`)) return json([{ name: "20269999000000_default_branch_only.sql", type: "file" }]);
+      return json(migrations.map((v) => ({ name: `${v}_x.sql`, type: "file" })));
+    }
     return json({}, 404);
   });
 }
@@ -74,22 +84,36 @@ describe("getUpdateStatus: available", () => {
     expect(s).toEqual({
       state: "available",
       latest: "1.2.0",
+      tag: "v1.2.0",
       current: "1.1.0",
       notes: "Notes: new stuff",
       url: `https://github.com/${UP}/releases/tag/v1.2.0`,
       migrations: 1,
       fork: FORK,
-      manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP_OWNER}:main`,
+      manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP_OWNER}:v1.2.0`,
     });
-    expect(f.calls.map((c) => c.url)).toEqual([
-      `https://api.github.com/repos/${UP}/releases/latest`,
-      `https://api.github.com/repos/${UP}/contents/supabase/migrations`,
-    ]);
+    expect(f.calls.map((c) => c.url)).toEqual([`https://api.github.com/repos/${UP}/releases/latest`, refUrl(), migUrl()]);
+  });
+
+  it("counts migrations on the release TAG's tree (contents?ref=<tag sha>), not the default branch", async () => {
+    const f = happy();
+    await getUpdateStatus({ ...base, fetch: f.fn, env: ENV_OK });
+    const mig = f.calls.map((c) => c.url).filter((u) => u.includes("/contents/"));
+    expect(mig).toEqual([migUrl()]);
+    expect(mig[0]).not.toMatch(/migrations$/);
+  });
+
+  it("reports migrations:null (unknown) when the release tag cannot be resolved, and does not fall back to the default branch", async () => {
+    const f = fakeFetch((url) =>
+      url.includes("/releases/latest") ? json(releaseBody()) : url.includes("/git/ref/tags/") ? json({ message: "Not Found" }, 404) : json([{ name: "20261020000008_x.sql", type: "file" }]),
+    );
+    expect(await getUpdateStatus({ ...base, fetch: f.fn, env: ENV_OK })).toMatchObject({ state: "available", tag: "v1.2.0", migrations: null });
+    expect(f.calls.some((c) => c.url.includes("/contents/"))).toBe(false);
   });
 
   it("uses the configured branch in the manual sync link", async () => {
     const s = await getUpdateStatus({ ...base, fetch: happy().fn, env: { ...ENV_OK, AGENCY_BOARD_UPDATE_BRANCH: "release/1.x" } });
-    expect(s).toMatchObject({ state: "available", manualSyncUrl: `https://github.com/${FORK}/compare/release/1.x...${UP_OWNER}:release/1.x` });
+    expect(s).toMatchObject({ state: "available", manualSyncUrl: `https://github.com/${FORK}/compare/release/1.x...${UP_OWNER}:v1.2.0` });
   });
 
   it("resolves the fork from the Vercel system env", async () => {
@@ -119,7 +143,7 @@ describe("getUpdateStatus: available", () => {
 
   it("compares numerically (1.10.0 is newer than 1.9.0)", async () => {
     const f = happy({ tag_name: "v1.10.0", html_url: `https://github.com/${UP}/releases/tag/v1.10.0` });
-    expect(await getUpdateStatus({ ...base, runningVersion: "1.9.0", fetch: f.fn, env: ENV_OK })).toMatchObject({ state: "available", latest: "1.10.0" });
+    expect(await getUpdateStatus({ ...base, runningVersion: "1.9.0", fetch: f.fn, env: ENV_OK })).toMatchObject({ state: "available", latest: "1.10.0", tag: "v1.10.0" });
   });
 
   it("never leaks the token into the result or the console", async () => {
@@ -136,11 +160,12 @@ describe("getUpdateStatus: setup", () => {
     expect(s).toEqual({
       state: "setup",
       latest: "1.2.0",
+      tag: "v1.2.0",
       current: "1.1.0",
       url: `https://github.com/${UP}/releases/tag/v1.2.0`,
-      manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP_OWNER}:main`,
+      manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP_OWNER}:v1.2.0`,
     });
-    expect(f.calls).toHaveLength(1); // no migration lookup for the hint
+    expect(f.calls).toHaveLength(1); // no tag or migration lookup for the hint
   });
 
   it("is setup when the token is only whitespace", async () => {
@@ -150,14 +175,14 @@ describe("getUpdateStatus: setup", () => {
 
   it("is setup when the fork cannot be resolved, with the upstream page as the manual link", async () => {
     const s = await getUpdateStatus({ ...base, fetch: happy().fn, env: { AGENCY_BOARD_GITHUB_TOKEN: TOKEN } });
-    expect(s).toMatchObject({ state: "setup", manualSyncUrl: `https://github.com/${UP}` });
+    expect(s).toMatchObject({ state: "setup", tag: "v1.2.0", manualSyncUrl: `https://github.com/${UP}/releases/tag/v1.2.0` });
     expect(JSON.stringify(s)).not.toContain(TOKEN);
   });
 
   it("is setup when the fork override is invalid (never used to build a URL)", async () => {
     const f = happy();
     const s = await getUpdateStatus({ ...base, fetch: f.fn, env: { AGENCY_BOARD_GITHUB_TOKEN: TOKEN, AGENCY_BOARD_FORK: "a/b/../c" } });
-    expect(s).toMatchObject({ state: "setup", manualSyncUrl: `https://github.com/${UP}` });
+    expect(s).toMatchObject({ state: "setup", manualSyncUrl: `https://github.com/${UP}/releases/tag/v1.2.0` });
     expect(JSON.stringify(s)).not.toContain("..");
   });
 
@@ -269,6 +294,7 @@ describe("getUpdateStatus: caching and outbound hygiene", () => {
     const f = happy();
     for (let i = 0; i < 6; i++) await getUpdateStatus({ ...base, fetch: f.fn, env: ENV_OK });
     expect(f.calls.filter((c) => c.url.includes("/releases/latest"))).toHaveLength(1);
+    expect(f.calls.filter((c) => c.url.includes("/git/ref/tags/"))).toHaveLength(1);
     expect(f.calls.filter((c) => c.url.includes("/contents/"))).toHaveLength(1);
   });
 
@@ -298,6 +324,7 @@ describe("getUpdateStatusWithin: bounded first render", () => {
         await gate;
         return json(releaseBody());
       }
+      if (url.includes("/git/ref/tags/")) return json({ ref: "refs/tags/v1.2.0", object: { sha: TAG_SHA, type: "commit" } });
       return json(MIGS_UP.map((v) => ({ name: `${v}_x.sql`, type: "file" })));
     }) as unknown as typeof fetch;
     return { fn, calls, open };

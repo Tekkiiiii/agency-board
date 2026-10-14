@@ -16,3 +16,4 @@ next-env.d.ts
 .DS_Store
 *.bak-agency-board-*
 backup-*.sql*
+!scripts/certs/*.pem

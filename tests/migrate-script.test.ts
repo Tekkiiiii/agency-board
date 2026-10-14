@@ -4,7 +4,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import net from "node:net";
+import tls from "node:tls";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,11 +19,13 @@ const require = createRequire(import.meta.url);
 const { Client } = require("pg");
 const SCRIPT = join(process.cwd(), "scripts", "migrate.mjs");
 const REAL_DIR = join(process.cwd(), "supabase", "migrations");
+const BUNDLED_CA = join(process.cwd(), "scripts", "certs", "supabase-ca.pem");
 
 type Result = { exitCode: number; applied: number; skipped?: string; failed?: string };
 type Mod = {
   runMigrations(o: Record<string, unknown>): Promise<Result>;
-  buildConnectionConfig(dbUrl: string, env: Record<string, string | undefined>): Record<string, any>;
+  buildConnectionConfig(dbUrl: string, env: Record<string, string | undefined>, bundledCaPath?: string): Record<string, any>;
+  loadBundledCa(path?: string): string;
 };
 async function load(): Promise<Mod> { return (await import(/* @vite-ignore */ pathToFileURL(SCRIPT).href)) as Mod; }
 
@@ -404,24 +409,121 @@ describe("TLS option building (no remote connection is made)", () => {
     }
   });
 
-  it("remote host without a CA: TLS on, certificate not verified (documented tradeoff)", async () => {
-    const { buildConnectionConfig } = await load();
-    const cfg = buildConnectionConfig("postgresql://u:p@db.example.com:5432/db", {});
-    expect(cfg.ssl).toEqual({ rejectUnauthorized: false });
+  const REMOTE = "postgresql://u:p@db.example.com:5432/db";
+  const FAKE_PEM = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----";
+
+  it("the bundled PEM holds exactly the two Supabase roots, pinned by fingerprint, subject and validity, none expired", () => {
+    const text = readFileSync(BUNDLED_CA, "utf8");
+    const blocks = text.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
+    expect(blocks).toHaveLength(2);
+    expect(text.indexOf("-----BEGIN CERTIFICATE-----")).toBeGreaterThan(0); // the leading comment block is ignored by the TLS stack
+    expect(text).not.toMatch(/PRIVATE KEY/);
+    const [c2021, c2025] = blocks.map((b) => new X509Certificate(b));
+    expect(c2021.fingerprint256).toBe("80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA");
+    expect(c2025.fingerprint256).toBe("5F:9B:77:95:1A:7A:A1:30:3F:9B:58:EE:A9:BF:A8:9E:35:8C:FD:C1:5F:97:86:FF:10:D4:93:0A:72:2C:9A:E2");
+    for (const c of [c2021, c2025]) {
+      expect(c.subject).toContain("CN=Supabase Root 2021 CA");
+      expect(c.subject).toContain("O=Supabase Inc");
+      expect(c.subject).toBe(c.issuer); // self-signed roots
+      expect(c.ca).toBe(true);
+      expect(new Date(c.validFrom).getTime()).toBeLessThan(Date.now());
+      expect(new Date(c.validTo).getTime()).toBeGreaterThan(Date.now());
+    }
+    expect(new Date(c2021.validFrom).toISOString()).toBe("2021-04-28T10:56:53.000Z");
+    expect(new Date(c2021.validTo).toISOString()).toBe("2031-04-26T10:56:53.000Z");
+    expect(new Date(c2025.validFrom).toISOString()).toBe("2025-09-03T08:01:25.000Z");
+    expect(new Date(c2025.validTo).toISOString()).toBe("2035-09-01T08:01:25.000Z");
+    expect(() => tls.createSecureContext({ ca: text })).not.toThrow();
   });
 
-  it("remote host with AGENCY_BOARD_DB_SSL_CA: full verification against that CA", async () => {
+  it("remote host, no override: verified against the bundled Supabase PEM, whole text", async () => {
     const { buildConnectionConfig } = await load();
-    const pem = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----";
-    const cfg = buildConnectionConfig("postgresql://u:p@db.example.com:5432/db", { AGENCY_BOARD_DB_SSL_CA: pem });
-    expect(cfg.ssl).toEqual({ ca: pem, rejectUnauthorized: true });
+    const cfg = buildConnectionConfig(REMOTE, {});
+    expect(cfg.ssl).toEqual({ ca: readFileSync(BUNDLED_CA, "utf8"), rejectUnauthorized: true });
   });
 
-  it("a sslmode query param in the URL cannot switch TLS off for a remote host", async () => {
+  it("no URL sslmode value changes the TLS decision for a remote host", async () => {
     const { buildConnectionConfig } = await load();
-    const cfg = buildConnectionConfig("postgresql://u:p@db.example.com:5432/db?sslmode=disable", {});
-    expect(cfg.ssl).toBeTruthy();
-    expect(cfg.connectionString).toBeUndefined();
+    const want = buildConnectionConfig(REMOTE, {}).ssl;
+    for (const q of ["disable", "allow", "prefer", "require", "verify-ca", "verify-full", "no-verify"]) {
+      const cfg = buildConnectionConfig(`${REMOTE}?sslmode=${q}&ssl=false`, {});
+      expect(cfg.ssl).toEqual(want);
+      expect(cfg.connectionString).toBeUndefined();
+    }
+  });
+
+  it("local hosts still get no TLS, with or without an override", async () => {
+    const { buildConnectionConfig } = await load();
+    for (const host of ["127.0.0.1", "localhost", "[::1]"]) {
+      expect(buildConnectionConfig(`postgresql://u:p@${host}:5432/db`, { AGENCY_BOARD_DB_SSL_CA: FAKE_PEM }).ssl).toBeFalsy();
+    }
+  });
+
+  it("AGENCY_BOARD_DB_SSL_CA replaces the bundle entirely (not additive)", async () => {
+    const { buildConnectionConfig } = await load();
+    const cfg = buildConnectionConfig(REMOTE, { AGENCY_BOARD_DB_SSL_CA: `  ${FAKE_PEM}\n\n` });
+    expect(cfg.ssl).toEqual({ ca: FAKE_PEM, rejectUnauthorized: true });
+    expect(cfg.ssl.ca).not.toContain("Supabase");
+  });
+
+  it("a whitespace-only override counts as unset", async () => {
+    const { buildConnectionConfig } = await load();
+    const want = buildConnectionConfig(REMOTE, {}).ssl;
+    for (const v of ["", "   ", "\n\t \n"]) expect(buildConnectionConfig(REMOTE, { AGENCY_BOARD_DB_SSL_CA: v }).ssl).toEqual(want);
+  });
+
+  it("a one-line override with literal backslash-n sequences is turned into real newlines", async () => {
+    const { buildConnectionConfig } = await load();
+    const oneLine = FAKE_PEM.replace(/\n/g, "\\n");
+    expect(oneLine).not.toContain("\n");
+    expect(buildConnectionConfig(REMOTE, { AGENCY_BOARD_DB_SSL_CA: oneLine }).ssl.ca).toBe(FAKE_PEM);
+  });
+
+  it("an override that holds no certificate fails closed with a message that names the variable and never echoes it", async () => {
+    const { buildConnectionConfig, runMigrations } = await load();
+    const garbage = "SECRETISH-not-a-pem-value-12345";
+    let msg = "";
+    try { buildConnectionConfig(REMOTE, { AGENCY_BOARD_DB_SSL_CA: garbage }); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toContain("AGENCY_BOARD_DB_SSL_CA");
+    expect(msg).toMatch(/BEGIN CERTIFICATE/);
+    expect(msg).not.toContain(garbage);
+
+    const out = capture();
+    const createClient = () => { throw new Error("must not connect"); };
+    const r = await runMigrations({
+      dbUrl: "postgresql://u:pw-FAKE-1@db.example.com:5432/db", dir: fixture({ "20300101000001_a.sql": "select 1;" }),
+      env: { AGENCY_BOARD_DB_SSL_CA: garbage }, createClient, ...out,
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.applied).toBe(0);
+    const all = out.lines.join("\n");
+    expect(all).toContain("AGENCY_BOARD_DB_SSL_CA");
+    expect(all).not.toContain(garbage);
+    expect(all).not.toContain("pw-FAKE-1");
+  });
+
+  it("a missing, empty or certificate-less bundled file fails closed; there is no unverified fallback", async () => {
+    const { buildConnectionConfig, loadBundledCa } = await load();
+    const empty = join(tmp, "empty.pem");
+    const noCert = join(tmp, "nocert.pem");
+    writeFileSync(empty, "");
+    writeFileSync(noCert, "# only a comment\n");
+    for (const bad of [join(tmp, "does-not-exist.pem"), empty, noCert]) {
+      expect(() => loadBundledCa(bad)).toThrow(/bundled/i);
+      expect(() => buildConnectionConfig(REMOTE, {}, bad)).toThrow(/bundled/i);
+    }
+    // the override wins over a broken bundle (the bundle is not read at all)
+    expect(buildConnectionConfig(REMOTE, { AGENCY_BOARD_DB_SSL_CA: FAKE_PEM }, join(tmp, "does-not-exist.pem")).ssl.ca).toBe(FAKE_PEM);
+    expect(loadBundledCa()).toBe(readFileSync(BUNDLED_CA, "utf8"));
+  });
+
+  it("no code path turns verification off: the script never sets rejectUnauthorized to anything but true", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    const uses = src.match(/rejectUnauthorized[^\n]*/g) ?? [];
+    expect(uses.length).toBeGreaterThan(0);
+    for (const u of uses) expect(u).not.toMatch(/rejectUnauthorized\s*[:=]\s*(false|0|!|env|process)/);
+    expect(src).not.toMatch(/NODE_TLS_REJECT_UNAUTHORIZED/);
+    expect(src).not.toMatch(/without certificate verification/i);
   });
 
   it("decodes percent-encoded user, password and database", async () => {
@@ -465,5 +567,154 @@ describe("real repo migrations", () => {
     expect(out.lines.join("\n")).not.toMatch(/FAILED/);
     expect(r).toMatchObject({ exitCode: 0, applied: files.length });
     expect(await runMigrations({ dbUrl, dir: REAL_DIR, env: {}, ...capture() })).toMatchObject({ exitCode: 0, applied: 0 });
+  });
+});
+
+// Real handshakes: node:tls plus the real pg client against a fake Postgres that answers SSLRequest, upgrades to TLS and
+// then rejects the startup packet with an auth-class ErrorResponse. A TLS failure therefore surfaces before any auth step,
+// and a TLS success surfaces as the auth error. Certificates are generated per run with the openssl CLI in a temp dir.
+function opensslOk(): boolean {
+  try { execFileSync("openssl", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
+}
+const HAS_OPENSSL = opensslOk();
+const HOST = "db.example.test";
+
+function openssl(cwd: string, args: string[]) { execFileSync("openssl", args, { cwd, stdio: "ignore" }); }
+/** Throwaway CA; returns its cert PEM. */
+function makeCa(dir: string, name: string): string {
+  openssl(dir, ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", `${name}.key`, "-out", `${name}.crt`,
+    "-subj", `/CN=Throwaway ${name}`, "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign"]);
+  return readFileSync(join(dir, `${name}.crt`), "utf8");
+}
+/** Server cert for `dns` signed by CA `ca`; `window` makes it expired when openssl supports -not_after. */
+function makeServerCert(dir: string, ca: string, name: string, dns: string, window?: [string, string]): { key: string; cert: string } {
+  openssl(dir, ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", `${name}.key`, "-out", `${name}.csr`, "-subj", `/CN=${dns}`]);
+  writeFileSync(join(dir, `${name}.ext`), `subjectAltName=DNS:${dns}\nbasicConstraints=CA:FALSE\n`);
+  const args = ["x509", "-req", "-in", `${name}.csr`, "-CA", `${ca}.crt`, "-CAkey", `${ca}.key`, "-CAcreateserial", "-out", `${name}.crt`, "-extfile", `${name}.ext`];
+  if (window) args.push("-not_before", window[0], "-not_after", window[1]); else args.push("-days", "2");
+  openssl(dir, args);
+  return { key: readFileSync(join(dir, `${name}.key`), "utf8"), cert: readFileSync(join(dir, `${name}.crt`), "utf8") };
+}
+
+function pgError(msg: string): Buffer {
+  const body = Buffer.concat([Buffer.from("SFATAL\0"), Buffer.from("VFATAL\0"), Buffer.from("C28000\0"), Buffer.from(`M${msg}\0`), Buffer.from([0])]);
+  const head = Buffer.alloc(5);
+  head.write("E", 0);
+  head.writeInt32BE(body.length + 4, 1);
+  return Buffer.concat([head, body]);
+}
+
+/** Fake Postgres: 'S' to the SSLRequest, TLS upgrade with the given identity, then an auth-class error for the startup packet. */
+async function fakePostgres(identity: { key: string; cert: string }): Promise<{ port: number; close(): Promise<void> }> {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((raw) => {
+    sockets.add(raw);
+    raw.on("error", () => {});
+    raw.once("data", (first: Buffer) => {
+      if (first.length !== 8 || first.readInt32BE(4) !== 80877103) { raw.destroy(); return; }
+      raw.write("S");
+      const secure = new tls.TLSSocket(raw, { isServer: true, key: identity.key, cert: identity.cert });
+      secure.on("error", () => {}); // a client that rejects our certificate aborts the handshake: expected
+      secure.once("data", () => { secure.end(pgError("fake server: authentication refused")); });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (server.address() as net.AddressInfo).port,
+    close: () => new Promise<void>((resolve) => { for (const s of sockets) s.destroy(); server.close(() => resolve()); }),
+  };
+}
+
+describe.skipIf(!HAS_OPENSSL)("TLS verification, real handshakes against a throwaway CA (openssl CLI on PATH)", () => {
+  const DB_URL = `postgresql://hs-user-FAKE:hs-pass-FAKE-9@${HOST}:5432/db`;
+  let dir = "";
+  let caA = "";
+  let caB = "";
+  let good: { key: string; cert: string };
+  let otherName: { key: string; cert: string };
+  let underB: { key: string; cert: string };
+  let expired: { key: string; cert: string } | null = null;
+  const closers: (() => Promise<void>)[] = [];
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "migrate-tls-"));
+    caA = makeCa(dir, "caA");
+    caB = makeCa(dir, "caB");
+    good = makeServerCert(dir, "caA", "good", HOST);
+    otherName = makeServerCert(dir, "caA", "othername", "other.example.test");
+    underB = makeServerCert(dir, "caB", "underb", HOST);
+    try { expired = makeServerCert(dir, "caA", "expired", HOST, ["20200101000000Z", "20200102000000Z"]); } catch { expired = null; }
+  });
+  afterAll(async () => {
+    for (const c of closers) await c();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function attempt(identity: { key: string; cert: string }, env: Record<string, string | undefined>) {
+    const { runMigrations } = await load();
+    const server = await fakePostgres(identity);
+    closers.push(server.close);
+    const out = capture();
+    const createClient = (config: Record<string, any>) =>
+      new Client({ ...config, host: "127.0.0.1", port: server.port, ssl: { ...config.ssl, servername: HOST } });
+    const r = await runMigrations({ dbUrl: DB_URL, dir: fixture({ "20300101000001_a.sql": "select 1;" }), env, createClient, ...out });
+    const all = out.lines.join("\n");
+    expect(all).not.toContain("hs-pass-FAKE-9");
+    expect(all).not.toContain("hs-user-FAKE");
+    expect(all).not.toContain(HOST);
+    return { r, all };
+  }
+
+  function expectTlsFailure(res: { r: Result; all: string }, anchor: RegExp) {
+    expect(res.r).toMatchObject({ exitCode: 1, applied: 0 });
+    expect(res.all).toMatch(/^migrate: FAILED connecting to the database: TLS certificate verification failed \([A-Z_]+\)\./m);
+    expect(res.all).toMatch(anchor);
+    expect(res.all).toContain("AGENCY_BOARD_DB_SSL_CA");
+    expect(res.all).toContain("Verification cannot be turned off.");
+    expect(res.all).not.toContain("fake server");
+  }
+
+  it("default env (bundled Supabase CA) rejects a server certificate from another CA", async () => {
+    const res = await attempt(good, {});
+    expectTlsFailure(res, /not signed by the bundled Supabase CA/);
+    expect(res.all).toContain("migrate: verifying the database certificate against the bundled Supabase CA");
+    expect(res.all).not.toMatch(/without certificate verification/);
+  });
+
+  it("override = the throwaway CA: TLS verifies, the failure is the auth error, not the TLS message", async () => {
+    const res = await attempt(good, { AGENCY_BOARD_DB_SSL_CA: caA });
+    expect(res.r).toMatchObject({ exitCode: 1, applied: 0, failed: "connecting to the database" });
+    expect(res.all).toContain("fake server: authentication refused");
+    expect(res.all).not.toContain("TLS certificate verification failed");
+    expect(res.all).toContain("migrate: verifying the database certificate against AGENCY_BOARD_DB_SSL_CA");
+  });
+
+  it("a comment block before the first BEGIN line does not stop the CA from working (same shape as the bundled file)", async () => {
+    const res = await attempt(good, { AGENCY_BOARD_DB_SSL_CA: `# header comment\n# more text\n${caA}` });
+    expect(res.all).toContain("fake server: authentication refused");
+    expect(res.all).not.toContain("TLS certificate verification failed");
+  });
+
+  it("right CA but a certificate for a different host name: reported as a TLS failure", async () => {
+    const res = await attempt(otherName, { AGENCY_BOARD_DB_SSL_CA: caA });
+    expectTlsFailure(res, /not signed by the CA in AGENCY_BOARD_DB_SSL_CA, or the host name does not match/);
+    expect(res.all).toContain("(ERR_TLS_CERT_ALTNAME_INVALID)");
+  });
+
+  it("override CA that did not sign the server certificate: fails closed", async () => {
+    const res = await attempt(underB, { AGENCY_BOARD_DB_SSL_CA: caA });
+    expectTlsFailure(res, /not signed by the CA in AGENCY_BOARD_DB_SSL_CA/);
+  });
+
+  it("an expired server certificate fails closed even under the right CA", async (ctx) => {
+    if (!expired) ctx.skip(); // this openssl cannot back-date a certificate (-not_before/-not_after)
+    const res = await attempt(expired!, { AGENCY_BOARD_DB_SSL_CA: caA });
+    expectTlsFailure(res, /AGENCY_BOARD_DB_SSL_CA/);
+    expect(res.all).toContain("(CERT_HAS_EXPIRED)");
+  });
+
+  it("the override is not additive: with the bundle replaced by CA-B, a CA-A server is rejected", async () => {
+    const res = await attempt(good, { AGENCY_BOARD_DB_SSL_CA: caB });
+    expectTlsFailure(res, /not signed by the CA in AGENCY_BOARD_DB_SSL_CA/);
   });
 });
