@@ -13,6 +13,7 @@
   },
   "scripts": {
     "dev": "next dev -p 13100",
+    "prebuild": "node scripts/migrate.mjs",
     "build": "next build",
     "start": "next start -p 13100",
     "typecheck": "tsc --noEmit",
@@ -25,6 +26,7 @@
     "@supabase/supabase-js": "^2.117.2",
     "mcp-handler": "^2.2.0",
     "next": "^15.5.27",
+    "pg": "^8.23.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "zod": "^4.6.5"

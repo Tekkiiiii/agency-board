@@ -122,9 +122,96 @@ These steps are documentation only. The repo contains no deploy automation beyon
 - **Any other agent** listed in `AGENCY_BOARD_AGENTS` gets only a token file at `~/.agency-board/<agent>.token`. You wire it into that agent yourself: MCP endpoint `<base-url>/api/mcp`, header `Authorization: Bearer <token>`.
 - Rotate, revoke, undo and the plaintext-token caveat are covered in [docs/connect.md](docs/connect.md).
 
+## Updating
+
+The dashboard can update your deployment for you. When the upstream project publishes a newer release than the one you run, the admin sees an **Update** button on the dashboard. The button is optional: you can always sync your fork by hand on GitHub.
+
+### What the button does
+
+- **When it shows.** Only in an admin dashboard session. It stays hidden unless the latest GitHub Release of the upstream repo is newer than the `version` in your running `package.json`. If the check fails for any reason, nothing is shown.
+- **Before you confirm.** The banner shows the release notes and how many database migrations will apply. The count is taken from upstream's default branch, because that is what the sync merges, not from the release tag. If the count cannot be worked out it says "Pending migration count unknown". The confirm dialog repeats the count and says that it syncs your fork on GitHub and that Vercel then redeploys.
+- **On confirm.** The server calls GitHub's "sync fork" API (`POST /repos/{owner}/{repo}/merge-upstream`) on your fork, with your token. That merges the upstream default branch into your fork's branch. Vercel sees the new commit and redeploys. During that build, `npm run build` first applies the new migrations to your database (the `prebuild` step runs `scripts/migrate.mjs`).
+- **Nothing is forced.** If GitHub reports a merge conflict (409) or a diverged fork (422), the dashboard shows a clear error and the banner keeps a "Sync manually instead" link to GitHub's compare page. The app never force-pushes and never retries.
+- **Guard rails.** The action re-checks the admin session, a same-origin check and a rate limit (3 attempts per minute) on the server, and works out the fork, branch and token from server environment variables only. Nothing is taken from the request.
+
+### Setup
+
+1. **Create a GitHub token.** In GitHub, go to Settings, Developer settings, Personal access tokens, Fine-grained tokens, then Generate new token.
+   - Resource owner: your own account (or the organisation that owns the fork).
+   - Repository access: **Only select repositories**, and pick your fork only.
+   - Repository permissions: **Contents: Read and write**. Nothing else. Metadata (read) is added automatically.
+   - Set an expiry. When the token expires, the Update button fails with a "GitHub rejected the token" message until you replace it.
+2. **Set `AGENCY_BOARD_GITHUB_TOKEN`** to that token in your Vercel project, Production environment.
+3. **Set `AGENCY_BOARD_DB_URL`** in the Production environment only. Use your Supabase database connection string, either the **direct** connection or the **session pooler** (the same kind of string the backup workflow uses). Do not use the transaction pooler: the runner takes an advisory lock, which needs a session. It must be a Supabase database: a bare Postgres lacks the `extensions` schema that the migrations use. This string is a full database credential. Treat it like the service role key.
+4. **Make sure the database was set up with `supabase db push`**, as in [Deploy from scratch](#deploy-from-scratch-free-tier). The runner uses the same bookkeeping table as the Supabase CLI (`supabase_migrations.schema_migrations`), so both can be used on one database. If you set the schema up another way, run `supabase migration repair` first to mark the versions that are already applied. Otherwise the first build tries to run migration 1 again and fails.
+5. **Redeploy** once so the new variables take effect.
+
+### How the fork is found
+
+The fork to sync is resolved on the server, never from a request:
+
+1. `AGENCY_BOARD_FORK` (`owner/repo`), if set.
+2. Otherwise Vercel's system variables `VERCEL_GIT_REPO_OWNER` and `VERCEL_GIT_REPO_SLUG`. Vercel exposes these by default for projects connected to a Git repo; keep "Automatically expose System Environment Variables" on.
+
+If the fork is the upstream repo itself, there is nothing to sync and the button stays hidden. An invalid `AGENCY_BOARD_FORK` is ignored with a log line that names the variable, not its value.
+
+GitHub's merge-upstream merges the fork's GitHub **parent**, not `AGENCY_BOARD_UPSTREAM`. If your repo is a fork of a fork, or you override `AGENCY_BOARD_UPSTREAM`, the release shown may not come from the repo that gets merged. Leave `AGENCY_BOARD_UPSTREAM` at its default for the standard setup.
+
+Other optional settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENCY_BOARD_UPDATE_BRANCH` | `main` | Branch of your fork that is synced. It must be the branch Vercel treats as the Production Branch. Otherwise the sync builds as a preview, `VERCEL_ENV` is not `production`, migrations are skipped and the new code ships against an unmigrated database. |
+| `AGENCY_BOARD_UPSTREAM` | `Tekkiiiii/agency-board` | Repo whose releases count as updates. Advanced; an invalid value turns the feature off. |
+| `AGENCY_BOARD_DB_SSL_CA` | unset | PEM of the CA that signed your database certificate. Turns on full TLS verification. |
+
+### Database connection and TLS
+
+For local hosts (`127.0.0.1`, `localhost`) the runner uses no TLS. For any other host TLS is on. Without `AGENCY_BOARD_DB_SSL_CA` the server certificate is **not verified**. An on-path attacker between the build and the database could terminate TLS and run arbitrary SQL as the database owner. The runner logs a line saying so. The default exists because Supabase's certificate chain is not in Node's trust store, so verifying by default would fail every first build. Set `AGENCY_BOARD_DB_SSL_CA` to get full verification. This is recommended. Supabase publishes its CA certificate in the dashboard under Database settings, SSL configuration. The connection string, password, host and any username other than `postgres` are scrubbed from the runner's output, so a connection error does not write your project ref into build logs.
+
+### Trust boundary
+
+Turning the button on means you trust upstream's default branch with your production deployment.
+
+- A synced commit runs at build time with your Production environment: `prebuild`, `next.config`, package scripts and migrations. That environment includes `AGENCY_BOARD_DB_URL` (database owner), the service role key and the GitHub token.
+- The preview guard (`VERCEL_ENV` check) is itself repo code. It is not a control against a compromised upstream.
+- Vercel has no build-only variables. `AGENCY_BOARD_DB_URL` and the GitHub token are also visible to your running functions. Keep them in the Production environment only.
+- The GitHub token can push to any branch of your fork, and a push to the production branch triggers a build with all secrets. Give it an expiry and rotate it on any suspected leak.
+- Upstream maintainers: use 2FA, branch protection and signed commits on the default branch.
+- Pinning a release tag instead of the branch head is a possible future hardening. It is not done today.
+
+### What you see when it is not set up
+
+- **No token yet (or the fork cannot be resolved).** If an update exists, the dashboard shows a one-line hint with a link to sync your fork on GitHub and a link to the release notes. There is no button. If there is no update, nothing is shown.
+- **Preview deployments never migrate.** The `prebuild` step skips when `VERCEL_ENV` is set to anything but `production`. It also skips when `AGENCY_BOARD_DB_URL` is unset. When `VERCEL_ENV` is unset (local builds, CI), it runs, so do not export `AGENCY_BOARD_DB_URL` in a shell where you build against a database you do not want migrated.
+- **A failed migration fails the build.** The failing migration is rolled back and the runner exits 1. Vercel then does not deploy, and the old version keeps serving. Migrations that already succeeded earlier in the same run stay applied.
+- **The release check is cached.** It is an unauthenticated call to the GitHub API, cached in memory for 1 hour per server instance (5 minutes after a failure), and it fails silent.
+
+### Caveats
+
+- **Sync merges the upstream default branch head, not the release tag.** GitHub's merge-upstream API has no tag option. So upstream's default branch must stay releasable: a fork that syncs can get commits newer than the release it was told about.
+- **Token scope.** GitHub documents Contents: write as the permission for `POST /repos/{owner}/{repo}/merge-upstream` ("Permissions required for fine-grained personal access tokens" on docs.github.com). That page does not say whether a sync that brings in changes under `.github/workflows` also needs **Workflows: Read and write**. This was not verified end to end. Add that permission only if a sync fails and the error mentions workflow files.
+- **Not tested against real GitHub.** The author has not run a real sync end to end against GitHub. The code is covered by tests with a mocked GitHub API and a local database.
+
+### Migration policy (upstream)
+
+Migrations that ship in a release must be safe to run while the previous version is still serving, because the old code keeps running against the migrated database until the new deploy is promoted.
+
+- **Additive only.** New tables, new columns that are nullable or have a default, new functions and indexes.
+- **No drop, rename or type change** in the same release as the code that stops using the old shape. Destructive changes take two releases (expand, then contract): release N adds the new shape and moves the code over; release N+1 removes the old one.
+- **Released migrations are immutable.** Once a version is in a release, do not edit its file. The runner skips versions it has already recorded, so an edit would never reach existing databases. Put the change in a new migration file.
+
+### Cutting a release (maintainers)
+
+1. Bump `version` in `package.json`.
+2. Tag it `vX.Y.Z`.
+3. Publish a GitHub Release for that tag. It must not be a draft or a prerelease. Put the notes in the release body: they are shown in the dashboard.
+
+The app compares the `version` in `package.json` (read at build time) with the tag of the latest Release.
+
 ## Configuration
 
-All variables are listed and commented in [`.env.example`](.env.example). Required server variables: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_TOKEN_HASH`, `ADMIN_EMAIL`, `CRON_SECRET`. Optional: `EMBED_URL`, `AGENCY_BOARD_BASE_URL`. CLI and client variables (`AGENCY_BOARD_ADMIN_TOKEN`, `AGENCY_BOARD_CODE`, `AGENCY_BOARD_TOKEN_FILE` and others) are described in `.env.example`.
+All variables are listed and commented in [`.env.example`](.env.example). Required server variables: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_TOKEN_HASH`, `ADMIN_EMAIL`, `CRON_SECRET`. Optional: `EMBED_URL`, `AGENCY_BOARD_BASE_URL`. The optional in-app update variables (`AGENCY_BOARD_GITHUB_TOKEN`, `AGENCY_BOARD_DB_URL`, `AGENCY_BOARD_DB_SSL_CA`, `AGENCY_BOARD_FORK`, `AGENCY_BOARD_UPDATE_BRANCH`, `AGENCY_BOARD_UPSTREAM`) are explained in [Updating](#updating). CLI and client variables (`AGENCY_BOARD_ADMIN_TOKEN`, `AGENCY_BOARD_CODE`, `AGENCY_BOARD_TOKEN_FILE` and others) are described in `.env.example`.
 
 Deployment settings, parsed once in `lib/config.ts`. A bad value stops the server at startup with a clear error.
 
@@ -150,7 +237,7 @@ Short version; the full threat model is in [SECURITY.md](SECURITY.md). Tokens id
 
 ```sh
 npm run typecheck                   # tsc --noEmit
-npm test                            # vitest run; 26 test files, needs `supabase start`
+npm test                            # vitest run; 37 test files, needs `supabase start`
 ```
 
 The suite is integration-style: it talks to the local Supabase stack (never a hosted project). Every row a test creates carries a `test-<runId>-` prefix and is swept afterwards. Tests that need the embedding function or PowerShell skip themselves when it is not available (the local stack without the edge runtime has no `embed`; `pwsh` is optional).
@@ -181,6 +268,7 @@ It is not a local-first or offline tool, and it ships wiring for three agent cli
 
 | File | Contents |
 |---|---|
+| [Updating](#updating) (this file) | The dashboard Update button: setup, token scopes, migrations on deploy, migration policy, cutting a release |
 | [docs/connect.md](docs/connect.md) | Connect codes, connect scripts, rotate and revoke, roles and grants, first director, auto-worker, linger window, unclaimed-task alert |
 | [docs/CONTRACT.md](docs/CONTRACT.md) | Build contract: identity and scopes, database, guard rules, tool behaviour, dashboard |
 | [docs/backup-restore.md](docs/backup-restore.md) | Nightly encrypted backup, download, decrypt, restore |
@@ -190,7 +278,7 @@ It is not a local-first or offline tool, and it ships wiring for three agent cli
 
 ## Status and limitations
 
-- **v0.1.** Expect breaking changes. The migrations were written fresh for this release and are edited in place, not squashed or versioned for upgrades yet.
+- **v0.1.** Expect breaking changes. Once a version is released, its migrations are immutable: a change is a new, additive migration file (see [Updating](#updating)). Before the first release tag, the current migrations may still be edited in place.
 - **Single owner.** The dashboard has one allowed email. There is no multi-user or team login.
 - **Free-tier limits.** Vercel Hobby and Supabase Free have request, storage, function-time and cron limits, and idle free Supabase projects can be paused. Check the current limits and terms (Vercel Hobby is for personal, non-commercial use) before you rely on it.
 - **Tokens on devices are plaintext files**, readable by anything running as that user. See docs/connect.md, section 6.
