@@ -617,6 +617,231 @@ describe("linger.sh listen / wait (armed sessions)", () => {
     });
   });
 
+  // ---- `prompt codex`: the UserPromptSubmit hook arms/disarms (runs OUTSIDE the Codex sandbox, which cannot write ~/.agency-board) ----
+  describe("prompt (Codex UserPromptSubmit hook)", () => {
+    const promptInput = (prompt: string | undefined, sid: string | null = SID) => // sid null = no session_id key
+      JSON.stringify({
+        ...(sid === null ? {} : { session_id: sid }),
+        turn_id: "turn-1",
+        transcript_path: "/tmp/rollout.jsonl",
+        cwd: "/Users/x/proj",
+        hook_event_name: "UserPromptSubmit",
+        model: "gpt-5",
+        permission_mode: "default",
+        ...(prompt === undefined ? {} : { prompt }),
+      });
+    const hook = (prompt: string | undefined, extra: Record<string, string> = {}, sid: string | null = SID, ag = "codex") =>
+      spawnSync("/bin/sh", [script, "prompt", ag], { env: env({ ...LENV, ...extra }), input: promptInput(prompt, sid), encoding: "utf8" });
+    const hookRaw = (input: string, ag = "codex") => spawnSync("/bin/sh", [script, "prompt", ag], { env: env(LENV), input, encoding: "utf8" });
+    const parse = (stdout: string) => {
+      expect(stdout.endsWith("\n")).toBe(true);
+      expect(stdout.trim().split("\n")).toHaveLength(1);
+      const o = JSON.parse(stdout.trim());
+      expect(o.hookSpecificOutput.hookEventName).toBe("UserPromptSubmit");
+      expect(o.systemMessage).toBe(o.hookSpecificOutput.additionalContext);
+      expect(o.hookSpecificOutput.additionalContext.startsWith("agency-board:")).toBe(true);
+      return o.hookSpecificOutput.additionalContext as string;
+    };
+    const untouched = () => {
+      expect(readdirSync(AM()).sort()).toEqual(["claude.token", "codex.token"]); // no listen dir, no log, nothing created
+      expect(curlCalls()).toHaveLength(0);
+    };
+
+    it("source: documents the prompt mode and the UserPromptSubmit hook, shares arm/disarm bodies", () => {
+      expect(LINGER_SH).toMatch(/linger\.sh prompt codex/);
+      expect(LINGER_SH).toContain("UserPromptSubmit");
+      expect(spawnSync("bash", ["--posix", "-n", script]).status).toBe(0);
+    });
+
+    it("$listen: arms the REAL session id (state codex-<sid>, no pending), one JSON line with additionalContext + identical systemMessage", () => {
+      stubCurl([["200", lbody([], 15)]]);
+      const r = hook("$listen");
+      expect(r.status).toBe(0);
+      expect(r.stderr).toBe("");
+      const line = parse(r.stdout);
+      expect(line).toMatch(/listen mode ON/);
+      expect(line).toMatch(/every 15 min/);
+      expect(line).toMatch(/Esc/);
+      expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
+      expect(readState("codex")).toMatch(/^mode=listen$/m);
+      expect(curlCalls()).toHaveLength(1);
+      expect(curlCalls()[0]).toContain("Bearer agency-board_codex_testtoken00000000000");
+      expect(readLog()).not.toContain("agency-board_codex_testtoken");
+      expect(r.stdout).not.toContain("agency-board_codex_testtoken");
+      expect(statSync(LS()).mode & 0o777).toBe(0o700);
+    });
+
+    it("$wait arms wait mode; $unlisten disarms EVERY codex session (Revision 1: the armed one may be another session) and the pending, never claude", () => {
+      stubCurl([["200", lbody([], 5)]]);
+      expect(parse(hook("$wait").stdout)).toMatch(/wait mode ON/);
+      expect(readState("codex")).toMatch(/^mode=wait$/m);
+      armed("listen", "codex", "other-session");
+      armed("listen", "claude", "cl");
+      writeFileSync(join(LS(), "codex-pending"), "mode=wait\nts=1\n");
+      const r = hook("$unlisten");
+      expect(r.status).toBe(0);
+      expect(parse(r.stdout)).toMatch(/OFF for every codex session/);
+      expect(readdirSync(LS())).toEqual(["claude-cl"]);
+    });
+
+    it("$unlisten typed in session B turns off the mode armed by session A (A's state and the pending are gone)", () => {
+      armed("listen", "codex", "session-A");
+      writeFileSync(join(LS(), "codex-pending"), "mode=listen\nts=1\n");
+      const r = hook("$unlisten", {}, "session-B");
+      expect(r.status).toBe(0);
+      expect(parse(r.stdout)).toMatch(/OFF/);
+      expect(existsSync(state("codex", "session-A"))).toBe(false);
+      expect(existsSync(join(LS(), "codex-pending"))).toBe(false);
+      expect(existsSync(state("codex", "session-B"))).toBe(false);
+    });
+
+    it("works without AGENCY_BOARD_TOKEN_CODEX (arm reads the token file) and does not touch claude state", () => {
+      armed("listen", "claude", "cl");
+      stubCurl([["200", lbody([], 30)]]);
+      expect(hook("$listen").status).toBe(0);
+      expect(existsSync(state("codex"))).toBe(true);
+      expect(existsSync(state("claude", "cl"))).toBe(true);
+    });
+
+    it("matches only the FIRST token: leading spaces and escaped newlines/tabs are skipped, trailing text is fine", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      for (const p of ["$listen", "   $listen", "\n\n$listen", "\t$listen", "\r\n  $listen", "$listen 15", "$listen\nplease check the board", "$listen cho tôi nhé"]) {
+        rmSync(LS(), { recursive: true, force: true });
+        const r = hook(p);
+        expect(r.status, p).toBe(0);
+        expect(parse(r.stdout), p).toMatch(/listen mode ON/);
+        expect(existsSync(state("codex")), p).toBe(true);
+      }
+    });
+
+    it("every non-matching prompt is silent and instant: no stdout/stderr, no file, no curl call, no log", () => {
+      const nonMatch = [
+        "hello there",
+        "",
+        "please run $listen for me",
+        "I said $listen and then more",
+        "/listen",
+        "listen",
+        "$Listen",
+        "$LISTEN",
+        "$listener",
+        "$listening",
+        "$unlisten2",
+        "$waiting",
+        "$wait,",
+        "$listen,",
+        "x $unlisten",
+        '"$listen"',
+        'say "session_id":"zzz" then $listen',
+        "\\$listen",
+        "\\n$listen", // a literal backslash-n in the text, not a newline
+        "$ listen",
+        "$",
+      ];
+      for (const p of nonMatch) {
+        const r = hook(p);
+        expect(r.status, JSON.stringify(p)).toBe(0);
+        expect(r.stdout, JSON.stringify(p)).toBe("");
+        expect(r.stderr, JSON.stringify(p)).toBe("");
+        untouched();
+      }
+      // no prompt field, no session id, garbage, empty stdin, braces only
+      for (const raw of [promptInput(undefined), JSON.stringify({ prompt: "hello" }), "not json", "", "{}", '{"prompt":'] as string[]) {
+        const r = hookRaw(raw);
+        expect(r.status, raw).toBe(0);
+        expect(r.stdout, raw).toBe("");
+        untouched();
+      }
+      // another agent, and no agent arg at all: the prompt hook is codex-only
+      expect(hook("$listen", {}, SID, "claude").stdout).toBe("");
+      expect(spawnSync("/bin/sh", [script, "prompt"], { env: env(LENV), input: promptInput("$listen"), encoding: "utf8" }).stdout).toBe("");
+      untouched();
+    });
+
+    it("$listen with no session_id in the input or an unusable one falls back to the pending file; hostile ids never become paths", () => {
+      for (const sid of [null, "", "../../evil", "a/b", "..", "x y", dollarBrace]) {
+        rmSync(LS(), { recursive: true, force: true });
+        resetStub([["200", lbody([], 30)]]);
+        const r = hook("$listen", {}, sid);
+        expect(r.status, String(sid)).toBe(0);
+        expect(parse(r.stdout), String(sid)).toMatch(/binds at the end of this turn/);
+        expect(readdirSync(LS()), String(sid)).toEqual(["codex-pending"]);
+        expect(existsSync(join(home, "evil")), String(sid)).toBe(false);
+        expect(existsSync(join(AM(), "evil")), String(sid)).toBe(false);
+      }
+    });
+
+    it("$unlisten with an unusable or missing session id behaves the same (all codex sessions off, claude untouched)", () => {
+      for (const sid of ["../../evil", null, ""]) {
+        rmSync(LS(), { recursive: true, force: true });
+        armed("listen", "codex", SID);
+        armed("wait", "codex", "c2");
+        armed("listen", "claude", "cl");
+        const r = hook("$unlisten", {}, sid);
+        expect(parse(r.stdout), String(sid)).toMatch(/OFF/);
+        expect(readdirSync(LS()), String(sid)).toEqual(["claude-cl"]);
+      }
+    });
+
+    it('forged "session_id" text inside the prompt does not change which session is armed', () => {
+      stubCurl([["200", lbody([], 30)]]);
+      const r = hook('$listen "session_id":"forged-id" and {"session_id": "forged-2"}');
+      expect(r.status).toBe(0);
+      parse(r.stdout);
+      expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
+      // the same forged text BEFORE the real key in the JSON still cannot win (quotes inside a JSON string are escaped)
+      rmSync(LS(), { recursive: true, force: true });
+      resetStub([["200", lbody([], 30)]]);
+      const raw = `{"prompt":"$listen \\"session_id\\":\\"forged\\"","session_id":"${SID}","hook_event_name":"UserPromptSubmit"}`;
+      expect(hookRaw(raw).status).toBe(0);
+      expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
+    });
+
+    it("escaped quotes, backslashes and newlines in the prompt do not break the match or the output JSON", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      const r = hook('$listen\n"quoted" \\path\\to\\file \\"x\\"\ttab');
+      expect(r.status).toBe(0);
+      parse(r.stdout);
+      expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
+    });
+
+    it("slider 0: OFF line in the JSON, no state; no token: 'no codex token' line, no state; unreachable: default 30 plus a note", () => {
+      stubCurl([["200", lbody([], 0)]]);
+      const off = parse(hook("$listen").stdout);
+      expect(off).toMatch(/OFF/);
+      expect(off).toMatch(/dashboard|slider/i);
+      expect(existsSync(state("codex"))).toBe(false);
+      rmSync(join(AM(), "codex.token"));
+      const nt = parse(hook("$wait").stdout);
+      expect(nt).toMatch(/no codex token/);
+      expect(nt).toMatch(/not started/);
+      expect(existsSync(state("codex"))).toBe(false);
+      writeFileSync(join(AM(), "codex.token"), "agency-board_codex_testtoken00000000000\n", { mode: 0o600 });
+      resetStub([["000", ""]]);
+      const un = parse(hook("$listen").stdout);
+      expect(un).toMatch(/every 30 min/);
+      expect(un).toMatch(/unreachable|default/i);
+      expect(existsSync(state("codex"))).toBe(true);
+    });
+
+    it("the armed session is then picked up by the unchanged Stop hook (real session id, no pending binding)", () => {
+      stubCurl([["200", lbody([], 1)], ["200", lbody([row(T1, "Reply ok")], 1)]]);
+      expect(hook("$listen").status).toBe(0);
+      const r = stop({ AGENCY_BOARD_TOKEN_CODEX: "x" }, "codex");
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.stdout.trim()).reason).toContain(T1);
+      expect(existsSync(state("codex"))).toBe(true);
+    });
+
+    it("the CLI arm/disarm for codex still work (manual use, Claude-style commands)", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      expect(arm("listen", SID, "codex").stdout).toMatch(/listen mode ON/);
+      expect(existsSync(state("codex"))).toBe(true);
+      expect(disarm(SID, "codex").stdout).toMatch(/OFF/);
+      expect(existsSync(state("codex"))).toBe(false);
+    });
+  });
+
   describe("listen loop (stop on an armed session)", () => {
     it("empty poll, empty poll, then a task on poll 3: block JSON with the task id, state stays armed, exit 0", () => {
       stubCurl([["200", lbody([], 1)], ["200", lbody([], 1)], ["200", lbody([row(T1, "Reply ok")], 1)]]);

@@ -674,9 +674,14 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     writeFileSync(CHJ(), JSON.stringify(old, null, 2) + "\n");
     const r1 = run(["--", "--hooks-only"]);
     expect(r1.status, r1.stderr).toBe(0);
-    expect(r1.stdout).toMatch(/run \/hooks in Codex and trust/);
+    expect(r1.stdout).toMatch(/Hooks need review/);
+    expect(r1.stdout).toMatch(/Trust all and continue/);
+    expect(r1.stdout).toMatch(/\/hooks/);
+    expect(r1.stdout).not.toMatch(/run \/hooks in Codex and trust the agency-board linger hooks/); // old wording
     const h = readJson(CHJ());
     expect(cmds(h, "SessionStart")).toEqual(["/bin/sh /x/codex-session-start.sh"]);
+    expect(cmds(h, "UserPromptSubmit")).toEqual(["sh ~/.agency-board/linger.sh prompt codex"]); // arms $listen/$wait/$unlisten outside the sandbox
+    expect(h.hooks.UserPromptSubmit[0].matcher).toBe("");
     expect(cmds(h, "Stop")).toEqual(["sh ~/.agency-board/linger.sh stop codex"]);
     expect(cmds(h, "PostToolUse")).toEqual(["sh ~/.agency-board/linger.sh mark codex", "sh ~/.agency-board/linger.sh kick codex"]);
     expect(h.hooks.PostToolUse[0].matcher).toBe("mcp__agency-board__complete_task");
@@ -686,7 +691,8 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     const r2 = run(["--", "--hooks-only"]);
     expect(r2.status, r2.stderr).toBe(0);
     expect(readFileSync(CHJ(), "utf8")).toBe(once);
-    expect(r2.stdout).not.toMatch(/trust/);
+    expect(r2.stdout).not.toMatch(/trust/i);
+    expect(r2.stdout).not.toMatch(/Hooks need review/);
     expect(baks(join(home, ".codex"), "hooks.json")).toHaveLength(1);
   });
 
@@ -712,6 +718,7 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r1.status, r1.stderr).toBe(0);
     expect(existsSync(join(AMD(), "linger.sh"))).toBe(true);
     expect(cmds(readJson(CHJ()), "Stop")).toEqual(["sh ~/.agency-board/linger.sh stop codex"]);
+    expect(cmds(readJson(CHJ()), "UserPromptSubmit")).toEqual(["sh ~/.agency-board/linger.sh prompt codex"]);
     const snap = [SJ(), CHJ(), join(AMD(), "linger.sh"), join(AMD(), "heartbeat.sh")].map((f) => readFileSync(f, "utf8"));
     const r2 = go();
     expect(r2.status, r2.stderr).toBe(0);
@@ -861,41 +868,88 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
       expect(spawnSync("/bin/sh", ["-n", join(AMD(), "linger.sh")]).status).toBe(0);
     });
 
-    it("codex: with a codex token and ~/.codex, installs prompts, skills and the Interrupt hook; rerun is a no-op; Stop 1900 upgraded", () => {
+    it("codex: with a codex token and ~/.codex, installs the skills (no shell command in them), NO prompts, the Interrupt and UserPromptSubmit hooks; rerun is a no-op; Stop 1900 upgraded", () => {
       writeTokens(true);
       mkdirSync(join(home, ".codex"));
       writeFileSync(CHJ(), JSON.stringify({ hooks: { Stop: [{ matcher: "", hooks: [{ type: "command", command: "sh ~/.agency-board/linger.sh stop codex", timeout: 1900 }] }] } }, null, 2) + "\n");
       const r = run(["--", "--hooks-only"]);
       expect(r.status, r.stderr).toBe(0);
-      expect(readdirSync(CPROMPTS()).sort()).toEqual(["listen.md", "unlisten.md", "wait.md"]);
+      expect(existsSync(CPROMPTS())).toBe(false); // /prompts:<name> is dead on Codex 0.162: no longer installed
       expect(readdirSync(CSKILLS()).sort()).toEqual(["listen", "unlisten", "wait"]);
-      for (const [name, cmd] of [["listen", "arm codex listen"], ["wait", "arm codex wait"], ["unlisten", "disarm codex"]]) {
-        const p = readFileSync(join(CPROMPTS(), `${name}.md`), "utf8");
+      for (const name of ["listen", "wait", "unlisten"]) {
         const k = readFileSync(join(CSKILLS(), name, "SKILL.md"), "utf8");
-        for (const t of [p, k]) {
-          expect(t).toContain(CMARK);
-          expect(t).toContain(`sh ~/.agency-board/linger.sh ${cmd}`);
-          expect(t).not.toContain(dollarBrace);
-        }
+        expect(k).toContain(CMARK);
+        expect(k).not.toContain(dollarBrace);
+        expect(k).not.toContain("linger.sh arm");
+        expect(k).not.toContain("linger.sh disarm");
+        expect(k).not.toMatch(/Run this command in your shell/);
+        expect(k).toContain("UserPromptSubmit");
+        expect(k).toContain('starts with "agency-board:"');
+        expect(k).toMatch(/NEVER run a shell command/);
+        expect(k).toMatch(/sandbox/);
+        expect(k).toMatch(/\/hooks/);
         expect(k.split("\n")[0]).toBe("---");
         expect(k).toMatch(new RegExp(`^name: ${name}$`, "m"));
         expect(k).toMatch(/^description: .+/m);
       }
+      const kl = readFileSync(join(CSKILLS(), "listen", "SKILL.md"), "utf8");
+      expect(kl).toMatch(/list_tasks/);
+      expect(kl).toMatch(/R2/);
+      expect(readFileSync(join(CSKILLS(), "wait", "SKILL.md"), "utf8")).toMatch(/do NOT claim/i);
       const h = readJson(CHJ());
       expect(cmds(h, "Interrupt")).toEqual(["sh ~/.agency-board/linger.sh interrupt codex"]);
+      expect(cmds(h, "UserPromptSubmit")).toEqual(["sh ~/.agency-board/linger.sh prompt codex"]);
       expect(stopTimeouts(h)).toEqual([86400]);
       const snapH = readFileSync(CHJ(), "utf8");
-      const snapP = readdirSync(CPROMPTS()).map((f) => readFileSync(join(CPROMPTS(), f), "utf8"));
+      const snapK = ["listen", "wait", "unlisten"].map((n) => readFileSync(join(CSKILLS(), n, "SKILL.md"), "utf8"));
       const r2 = run(["--", "--hooks-only"]);
       expect(r2.status, r2.stderr).toBe(0);
       expect(readFileSync(CHJ(), "utf8")).toBe(snapH);
-      expect(readdirSync(CPROMPTS()).map((f) => readFileSync(join(CPROMPTS(), f), "utf8"))).toEqual(snapP);
-      expect(readdirSync(CPROMPTS())).toHaveLength(3);
+      expect(["listen", "wait", "unlisten"].map((n) => readFileSync(join(CSKILLS(), n, "SKILL.md"), "utf8"))).toEqual(snapK);
+      expect(existsSync(CPROMPTS())).toBe(false);
       expect(readdirSync(join(CSKILLS(), "listen"))).toEqual(["SKILL.md"]);
-      expect(r2.stdout).not.toMatch(/trust/);
+      expect(r2.stdout).not.toMatch(/trust/i);
     });
 
-    it("codex: a pre-existing non-marker prompt or skill is left alone with a warning", () => {
+    it("codex: the claude command files are byte-identical to before (still the bang arm line, not the hook text)", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      run(["--", "--hooks-only"]);
+      const c = readFileSync(join(CMDS(), "listen.md"), "utf8");
+      expect(c).toContain(bang(`sh ~/.agency-board/linger.sh arm claude listen "${dollarBrace}"`));
+      expect(c).not.toContain("UserPromptSubmit");
+    });
+
+    it("codex: an existing user UserPromptSubmit hook is kept; ours is appended once", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(CHJ(), JSON.stringify({ hooks: { UserPromptSubmit: [{ matcher: "", hooks: [{ type: "command", command: "echo mine" }] }] } }, null, 2) + "\n");
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      expect(cmds(readJson(CHJ()), "UserPromptSubmit")).toEqual(["echo mine", "sh ~/.agency-board/linger.sh prompt codex"]);
+    });
+
+    it("codex upgrade: a marked ~/.codex/prompts/{listen,wait,unlisten}.md from an older connect is moved aside to a .bak-agency-board-<ts> (listed under Backups), never re-created; a rerun is a no-op", () => {
+      writeTokens(true);
+      mkdirSync(CPROMPTS(), { recursive: true });
+      for (const n of ["listen", "wait", "unlisten"]) writeFileSync(join(CPROMPTS(), `${n}.md`), `---\ndescription: old ${n}\n---\n${CMARK}\nRun sh ~/.agency-board/linger.sh arm codex ${n}\n`);
+      const r = run(["--", "--hooks-only"]);
+      expect(r.status, r.stderr).toBe(0);
+      const left = readdirSync(CPROMPTS()).sort();
+      expect(left.filter((f) => !f.includes(".bak-agency-board-"))).toEqual([]); // the live prompt files are gone
+      expect(left).toHaveLength(3);
+      for (const n of ["listen", "wait", "unlisten"]) {
+        const b = baks(CPROMPTS(), `${n}.md`);
+        expect(b, n).toHaveLength(1);
+        expect(readFileSync(join(CPROMPTS(), b[0]), "utf8")).toContain(`arm codex ${n}`); // content preserved
+        expect(r.stdout).toContain(b[0]); // reported under Backups
+      }
+      const r2 = run(["--", "--hooks-only"]);
+      expect(r2.status, r2.stderr).toBe(0);
+      expect(readdirSync(CPROMPTS()).sort()).toEqual(left);
+    });
+
+    it("codex: a pre-existing NON-marker prompt is the user's: untouched, no warning, no backup; a non-marker skill is left alone with a warning", () => {
       writeTokens(true);
       mkdirSync(CPROMPTS(), { recursive: true });
       mkdirSync(join(CSKILLS(), "wait"), { recursive: true });
@@ -904,10 +958,11 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
       const r = run(["--", "--hooks-only"]);
       expect(r.status, r.stderr).toBe(0);
       expect(readFileSync(join(CPROMPTS(), "listen.md"), "utf8")).toBe("mine\n");
+      expect(readdirSync(CPROMPTS())).toEqual(["listen.md"]); // no backup, no other prompt installed
       expect(readFileSync(join(CSKILLS(), "wait", "SKILL.md"), "utf8")).toBe("mine too\n");
-      expect(r.stderr).toMatch(/listen\.md/);
+      expect(r.stderr).not.toMatch(/prompts/);
       expect(r.stderr).toMatch(/SKILL\.md/);
-      expect(existsSync(join(CPROMPTS(), "wait.md"))).toBe(true);
+      expect(existsSync(join(CSKILLS(), "listen", "SKILL.md"))).toBe(true);
     });
 
     it("codex: no codex token or no ~/.codex means no prompts, no skills, no ~/.agents, no Interrupt hook", () => {

@@ -466,8 +466,8 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
      spliced into connect.sh at `__AGENCY_BOARD_LINGER_SH__`) and add a `PostToolUse` hook (matcher `mcp__agency-board__complete_task`,
      `sh ~/.agency-board/linger.sh mark claude`) and a `Stop` hook (`... linger.sh stop claude`, timeout 86400) by the same JXA merge
      (idempotent on `agency-board/linger.sh`); with a codex token and an existing `~/.codex`, the same two hooks go into
-     `~/.codex/hooks.json` with agent `codex` (plus an `Interrupt` hook, §21). An existing linger `Stop` hook with a timeout below 86400 is raised to 86400.
-     Slash commands and Codex prompts/skills: §21. Windows (`connect.ps1`) has no linger hooks and no slash commands.
+     `~/.codex/hooks.json` with agent `codex` (plus an `Interrupt` hook and a `UserPromptSubmit` hook, §21). An existing linger `Stop` hook with a timeout below 86400 is raised to 86400.
+     Slash commands and Codex skills: §21. Windows (`connect.ps1`) has no linger hooks and no slash commands.
   8. Print summary: agent, token prefix, files changed, backups; then "Restart your Claude/Codex/Hermes sessions."
   Re-running is safe (idempotent blocks). Never echo full tokens.
 - connect.ps1 (Windows PowerShell 5.1: no `??`, no ternary, no `&&`; `[Net.ServicePointManager]::SecurityProtocol = 'Tls12'`;
@@ -1062,13 +1062,22 @@ claude and codex identities (hermes, grok: no slider, no hooks). Server action `
 Page load: `loadListenMinutes` (never throws; missing row shows the default 30).
 
 ### 21.5 `linger.sh` modes (`lib/scripts/lingerSh.ts` -> `~/.agency-board/linger.sh`; one script, one Stop hook, never two parallel Stop hooks)
-- `arm <claude|codex> <listen|wait> [session-id]` (run by the slash command, not a hook, no stdin). State dir `~/.agency-board/listen/`
+- `arm <claude|codex> <listen|wait> [session-id]` (run by the Claude slash command, no stdin; for Codex by the `prompt` hook below; also manual use). State dir `~/.agency-board/listen/`
   (700). State file `<agent>-<sid>` (sid reduced to `[A-Za-z0-9_-]`, max 80) holds `mode=`, `ts=`, `seen=`, `blk=`. No usable sid (empty,
-  literal unsubstituted placeholder, Codex has none): writes `<agent>-pending`; the next `stop` of that agent with a pending file < 300 s old
+  literal unsubstituted placeholder, a manual Codex call): writes `<agent>-pending`; the next `stop` of that agent with a pending file < 300 s old
   binds it to its own `session_id`. Polls `tasks?mine=1&status=open` for `listen_minutes`: 0 -> arms nothing, prints the OFF message, exit 0;
   server unreachable -> arms with 30 and says so. Prints one status line (Claude Code injects stdout into the command).
 - `disarm <claude|codex> [sid]` removes the session state and pending; without a sid, every state file of that agent on this machine.
 - `interrupt <claude|codex>` (Codex `Interrupt` hook, `session_id` from stdin): disarm for that session, silent. Documented event, untested.
+- `prompt codex` (Codex `UserPromptSubmit` hook; runs OUTSIDE the Codex sandbox, which cannot write `~/.agency-board`): stdin JSON `{session_id, prompt, ...}`.
+  First token of the raw `prompt` (leading spaces and `\n \t \r` skipped; ends at whitespace, backslash or quote), case sensitive, exactly `$listen`, `$wait` or
+  `$unlisten`; anything else (token later in the text, `/listen`, empty, no `prompt`, other agent) -> exit 0 at once with NO stdout, no file, no network, no log.
+  Match: `$listen|$wait` -> same code as `arm codex <mode> <session_id>` (shared shell function `arm_do`; the hook's real `session_id`, state `listen/codex-<sid>`;
+  unusable id -> `codex-pending` fallback); `$unlisten` -> same code as `disarm codex` WITHOUT an id (every codex session on this machine: the armed session may be
+  another one, and Codex queues a typed prompt while the Stop hook loops). Output: exactly one JSON line
+  `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<status>"},"systemMessage":"<status>"}`, `<status>` = the arm/disarm status line
+  (starts `agency-board:`; JSON-escaped), exit 0 always. No `AGENCY_BOARD_TOKEN_CODEX` gate (arm reads `~/.agency-board/codex.token`). No token / slider 0 / server unreachable
+  behave as for `arm`. Tokens and state stay unwritable from the sandbox (no `config.toml` edit, no extra writable root).
 - `stop <agent>`: armed session (state or bound pending) -> listen loop, otherwise the unchanged marker linger (§7, docs/connect.md section 10).
   Open-ended (no deadline): poll at once, then sleep `listen_minutes * AGENCY_BOARD_LISTEN_UNIT` seconds (unit default 60; tests set 1); `listen_minutes` is
   re-read from every poll body, so a slider change applies to the next sleep; 0 -> remove state, log `off by dashboard slider`, exit 0 silently.
@@ -1085,9 +1094,14 @@ Page load: `loadListenMinutes` (never throws; missing row shows the default 30).
 - Claude: `~/.claude/commands/{listen,wait,unlisten}.md`; frontmatter `description`, `disable-model-invocation: true`,
   `allowed-tools: Bash(sh ~/.agency-board/linger.sh:*)`; marker line `<!-- agency-board:commands v1 -->` after the frontmatter (a file without it is
   not overwritten, warning); a `!` line runs `sh ~/.agency-board/linger.sh arm claude <mode> "${CLAUDE_SESSION_ID}"` (`disarm` for unlisten). Arguments ignored.
-- Codex (only with a codex token and `~/.codex`; untested, no Codex CLI here): `~/.codex/prompts/{listen,wait,unlisten}.md` (custom prompts,
-  `/prompts:listen`, deprecated by OpenAI) and `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (`$listen` / `/skills`); both run
-  `sh ~/.agency-board/linger.sh arm codex <mode>` (no sid: pending binding). `~/.codex/hooks.json` also gets the `Interrupt` hook.
+- Codex (only with a codex token and `~/.codex`): `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (`$listen` / `/skills`, same marker line); the skill body
+  runs NO shell command (the sandbox cannot write `~/.agency-board`): it says the `UserPromptSubmit` hook already switched the mode, to read the
+  `agency-board:` line in the context, to tell your user and stop if there is none (hook not active: `/hooks` / "Trust all and continue", or `connect.sh --hooks-only`)
+  or it says OFF / not started, and NEVER to start or stop the mode with a shell command. The `claude` flavour is unchanged. `~/.codex/hooks.json` also gets
+  the `Interrupt` hook and `UserPromptSubmit` (`sh ~/.agency-board/linger.sh prompt codex`, no matcher, no timeout), idempotent on `agency-board/linger.sh prompt`.
+  Codex custom prompts (`~/.codex/prompts/*.md`, `/prompts:<name>`) are NOT installed any more (codex-cli 0.162 does not recognize them): a prompt file with the
+  marker is moved to `<file>.bak-agency-board-<ts>` (listed under Backups), one without it is left alone. A rerun that adds a Codex hook prints the trust note:
+  Codex shows "Hooks need review" at its next start, choose "Trust all and continue" (or `/hooks`); never `--dangerously-bypass-hook-trust`.
 - `connect.ps1`: not covered. No changes to `lib/guide.ts` (guide `CHAR_CAP` stays 8000).
 - Sources: https://developers.openai.com/codex/custom-prompts , https://developers.openai.com/codex/hooks ,
   https://developers.openai.com/codex/build-skills , https://code.claude.com/docs/en/skills .

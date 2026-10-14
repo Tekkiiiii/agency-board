@@ -14,9 +14,16 @@ export const LINGER_SH = String.raw`#!/bin/sh
 #                                   AGENCY_BOARD_LINGER_INTERVAL seconds (default 300); a hit blocks the stop so the
 #                                   agent continues; after the next completed task a fresh window starts.
 #                                   An ARMED session (see arm) instead listens open-ended, see below.
-# Slash-command modes (/listen /wait /unlisten, installed by connect.sh; arm and disarm are run by the command, not a hook):
+#   linger.sh prompt codex          Codex UserPromptSubmit hook. Runs OUTSIDE the Codex sandbox (a model shell command cannot write
+#                                   ~/.agency-board there). Reads the hook JSON on stdin: session_id and the FIRST TOKEN of the raw
+#                                   prompt. Exactly $listen, $wait or $unlisten (case sensitive) = arm / disarm with the same code as
+#                                   the arm and disarm modes below (listen and wait use the hook's real session id; $unlisten turns
+#                                   off every codex session on this machine, because the armed session may be another one); prints ONE
+#                                   JSON line (additionalContext + systemMessage = the status line). Every other prompt: exit 0 at
+#                                   once, no output, no file, no network, no log.
+# Slash-command modes (/listen /wait /unlisten, installed by connect.sh; Claude Code runs arm and disarm from the command, Codex from the prompt hook above):
 #   linger.sh arm <claude|codex> <listen|wait> [session-id]   turn the mode on for a session: state file in ~/.agency-board/listen/.
-#                                   No usable session id (the placeholder was not substituted, Codex has none): a pending file that
+#                                   No usable session id (the placeholder was not substituted, a manual Codex call): a pending file that
 #                                   the next Stop of that agent binds to its own session id. Refuses when the dashboard slider is 0.
 #   linger.sh disarm <claude|codex> [session-id]   turn it off (no id: every session of that agent on this machine).
 #   linger.sh interrupt <claude|codex>   Codex Interrupt hook: same as disarm for the session in the hook JSON, silent.
@@ -74,17 +81,17 @@ num() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
 clean_sid() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-80; }
 valid_sid() { [ -n "$1" ] && [ "$(clean_sid "$1")" = "$1" ]; }
 
-# arm / disarm: run by the slash command (Claude Code injects stdout into the command), no stdin, no hook.
-# They need no AGENCY_BOARD_TOKEN_CODEX: the poll in arm uses the token file.
-if [ "$MODE" = arm ]; then
-  LMODE=$3
-  case "$LMODE" in listen|wait) ;; *) printf '%s\n' "agency-board: usage: linger.sh arm <claude|codex> <listen|wait> [session-id]"; exit 0 ;; esac
+# arm_do / disarm_do: the bodies of the arm and disarm modes, also used by the Codex prompt hook; each prints ONE status line.
+# They need no AGENCY_BOARD_TOKEN_CODEX: the poll in arm_do uses the token file. Nothing here exits the script (return only).
+arm_do() { # <listen|wait> [session-id]
+  LMODE=$1
+  case "$LMODE" in listen|wait) ;; *) printf '%s\n' "agency-board: usage: linger.sh arm <claude|codex> <listen|wait> [session-id]"; return 0 ;; esac
   T=$(head -n 1 "$AM/$AG.token" 2>/dev/null | tr -d '\r')
-  [ -n "$T" ] || { printf '%s\n' "agency-board: no $AG token in ~/.agency-board; connect this machine first. $LMODE mode was not started."; exit 0; }
-  mkdir -p "$LS" 2>/dev/null || { printf '%s\n' "agency-board: cannot create ~/.agency-board/listen; $LMODE mode was not started."; exit 0; }
+  [ -n "$T" ] || { printf '%s\n' "agency-board: no $AG token in ~/.agency-board; connect this machine first. $LMODE mode was not started."; return 0; }
+  mkdir -p "$LS" 2>/dev/null || { printf '%s\n' "agency-board: cannot create ~/.agency-board/listen; $LMODE mode was not started."; return 0; }
   chmod 700 "$LS" 2>/dev/null
   find "$LS" -type f -mtime +2 -exec rm -f {} + 2>/dev/null
-  RF=$(mktemp "$LS/poll.XXXXXX" 2>/dev/null) || exit 0
+  RF=$(mktemp "$LS/poll.XXXXXX" 2>/dev/null) || return 0
   CODE=$(curl -sS -m 10 -o "$RF" -w '%{http_code}' -H "Authorization: Bearer $T" "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" </dev/null 2>/dev/null)
   LMIN=30
   NOTE=''
@@ -98,9 +105,9 @@ if [ "$MODE" = arm ]; then
   [ "$LMIN" -le 60 ] || LMIN=60
   if [ "$LMIN" -eq 0 ]; then
     printf '%s\n' "agency-board: $LMODE mode is OFF for $AG on this machine (dashboard interval slider is 0, range 1 to 60 min). Nothing was started; raise the slider to use it."
-    exit 0
+    return 0
   fi
-  SIDARG=$4
+  SIDARG=$2
   if valid_sid "$SIDARG"; then
     F="$LS/$AG-$SIDARG"
     rm -f "$LS/$AG-pending"
@@ -109,13 +116,14 @@ if [ "$MODE" = arm ]; then
     F="$LS/$AG-pending"
     BOUND=" This session's id is not available here; it binds at the end of this turn."
   fi
-  printf 'mode=%s\nts=%s\nseen=\nblk=\n' "$LMODE" "$(date +%s)" > "$F" 2>/dev/null || { printf '%s\n' "agency-board: cannot write the $LMODE state; not started."; exit 0; }
+  printf 'mode=%s\nts=%s\nseen=\nblk=\n' "$LMODE" "$(date +%s)" > "$F" 2>/dev/null || { printf '%s\n' "agency-board: cannot write the $LMODE state; not started."; return 0; }
   if [ "$LMODE" = listen ]; then WHAT="tasks handed to you are worked automatically"; else WHAT="you are only alerted, nothing is claimed"; fi
-  printf '%s\n' "agency-board: $LMODE mode ON for this $AG session: checking the board every $LMIN min$NOTE; $WHAT. Stop with /unlisten or Esc.$BOUND"
-  exit 0
-fi
-if [ "$MODE" = disarm ]; then
-  SIDARG=$3
+  if [ "$AG" = codex ]; then STOPW='$unlisten'; else STOPW=/unlisten; fi
+  printf '%s\n' "agency-board: $LMODE mode ON for this $AG session: checking the board every $LMIN min$NOTE; $WHAT. Stop with $STOPW or Esc.$BOUND"
+  return 0
+}
+disarm_do() { # [session-id]; no usable id = every session of this agent on this machine
+  SIDARG=$1
   if valid_sid "$SIDARG"; then
     rm -f "$LS/$AG-$SIDARG" "$LS/$AG-pending"
     printf '%s\n' "agency-board: listen/wait mode is OFF for this $AG session."
@@ -123,6 +131,25 @@ if [ "$MODE" = disarm ]; then
     for F in "$LS/$AG-"*; do [ -f "$F" ] && rm -f "$F"; done
     printf '%s\n' "agency-board: listen/wait mode is OFF for every $AG session on this machine."
   fi
+  return 0
+}
+if [ "$MODE" = arm ]; then arm_do "$3" "$4"; exit 0; fi
+if [ "$MODE" = disarm ]; then disarm_do "$3"; exit 0; fi
+# prompt: Codex UserPromptSubmit hook. Fires on EVERY Codex prompt (also the launchd worker's), so a prompt that is not
+# exactly $listen / $wait / $unlisten as its first token leaves at once: no output, no file, no network, no log.
+# Only the first token of the raw prompt is looked at; quotes inside the JSON string are escaped (\"), so text in the
+# prompt can never forge a "session_id" key or the "prompt" key.
+if [ "$MODE" = prompt ]; then
+  [ "$AG" = codex ] || exit 0
+  IN=$(tr -d '\n')
+  case "$IN" in *'"prompt"'*'$'*) ;; *) exit 0 ;; esac
+  PTOK=$(printf '%s' "$IN" | sed -n 's/.*"prompt"[ ]*:[ ]*"\(.*\)$/\1/p' | head -n 1 | sed 's/\\[ntr]/ /g; s/^[ ]*//; s/[ \\"].*//')
+  case "$PTOK" in '$listen') PM=listen ;; '$wait') PM=wait ;; '$unlisten') PM=unlisten ;; *) exit 0 ;; esac
+  PSID=$(printf '%s' "$IN" | sed 's/"prompt"[ ]*:[ ]*".*//' | sed -n 's/.*"session_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$PSID" ] || PSID=$(printf '%s' "$IN" | sed -n 's/.*"session_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
+  if [ "$PM" = unlisten ]; then PLINE=$(disarm_do ""); else PLINE=$(arm_do "$PM" "$PSID"); fi
+  PJ=$(printf '%s' "$PLINE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"%s"},"systemMessage":"%s"}\n' "$PJ" "$PJ"
   exit 0
 fi
 if [ "$MODE" = interrupt ]; then

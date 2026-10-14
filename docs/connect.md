@@ -55,6 +55,10 @@ When the heartbeat script changes (for example the session-start inbox below), r
 no code exchange and does not touch the MCP, Codex, or Hermes config. Its only server call is the
 best-effort agent-guide download (see "Agent guide" below).
 
+Codex step after any run that adds a Codex hook (the output says so): Codex shows "Hooks need review" at its next start.
+Choose "Trust all and continue" (or run `/hooks` and trust the agency-board hooks). Until then `$listen`, `$wait` and
+`$unlisten` do nothing; the new `UserPromptSubmit` hook is what runs them (section 12).
+
 ```sh
 curl -fsSL https://<your-app>.vercel.app/connect.sh | sh -s -- --hooks-only
 # or: AGENCY_BOARD_HOOKS_ONLY=1 sh connect.sh
@@ -108,9 +112,9 @@ not change are not touched and not backed up. The script prints the list of chan
 | `~/.hermes/.env` | `AGENCY_BOARD_TOKEN_HERMES=...` line (replaced in place) |
 | `~/.hermes/config.yaml` | `agency-board:` entry inserted right under the top-level `mcp_servers:` (key created at EOF if absent) |
 | `~/.claude/settings.json` | `SessionStart` + `Stop` hooks running `sh ~/.agency-board/heartbeat.sh ...` (edited as JSON with `osascript -l JavaScript`; skipped if a hook with `agency-board/heartbeat.sh` exists), plus `PostToolUse` (matcher `mcp__agency-board__complete_task`) and a second `Stop` hook (timeout 86400 s) running `sh ~/.agency-board/linger.sh mark\|stop claude`; each is skipped if a hook with `agency-board/linger.sh` exists in that event, except that an existing linger `Stop` hook with a timeout below 86400 is raised to 86400 (upgrade path, section 12) |
-| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | the same two linger hooks with agent `codex` plus an `Interrupt` hook (`sh ~/.agency-board/linger.sh interrupt codex`); existing hooks are kept. Codex asks you to trust new hooks once: run `/hooks` in Codex |
+| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | the same two linger hooks with agent `codex` plus an `Interrupt` hook (`sh ~/.agency-board/linger.sh interrupt codex`) and a `UserPromptSubmit` hook (`sh ~/.agency-board/linger.sh prompt codex`, arms `$listen` / `$wait` / `$unlisten` outside the Codex sandbox, section 12); existing hooks are kept. Codex asks you to trust new hooks once: "Trust all and continue" at its next start, or `/hooks` |
 | `~/.claude/commands/{listen,wait,unlisten}.md` | slash commands `/listen`, `/wait`, `/unlisten` (section 12). Each file carries the marker line `<!-- agency-board:commands v1 -->` after the frontmatter; a file without the marker is not overwritten (warning) |
-| `~/.codex/prompts/{listen,wait,unlisten}.md`, `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (only with a codex token and an existing `~/.codex`) | Codex equivalents: custom prompts (`/prompts:listen`) and skills (`$listen`), see section 12 |
+| `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (only with a codex token and an existing `~/.codex`) | Codex skills (`$listen`, `$wait`, `$unlisten`); they run no command, see section 12. Custom prompts `~/.codex/prompts/{listen,wait,unlisten}.md` are no longer installed: one that carries the marker (older connect.sh) is moved to `<file>.bak-agency-board-<ts>`, one without it is yours and left alone |
 | `~/.agency-board/listen/` | dir mode 700; per-session state files `<agent>-<session_id>` and `<agent>-pending` created by `/listen` and `/wait`, removed by `/unlisten` or Esc |
 
 Blocks are delimited by `# >>> agency-board >>>` and `# <<< agency-board <<<`.
@@ -148,8 +152,10 @@ claude mcp remove -s user agency-board
 # delete the lines between "# >>> agency-board >>>" and "# <<< agency-board <<<" (inclusive) in:
 #   ~/.codex/config.toml  ~/.zshrc  ~/.bash_profile  ~/.hermes/config.yaml
 # delete the AGENCY_BOARD_TOKEN_HERMES= line in ~/.hermes/.env
-# delete the heartbeat and linger hooks in ~/.claude/settings.json (and the linger hooks in ~/.codex/hooks.json)
-rm -f ~/.claude/commands/{listen,wait,unlisten}.md ~/.codex/prompts/{listen,wait,unlisten}.md
+# delete the heartbeat and linger hooks in ~/.claude/settings.json (and the linger hooks, incl. Interrupt and UserPromptSubmit, in ~/.codex/hooks.json;
+# Codex keeps a trusted_hash per hook in ~/.codex/config.toml [hooks.state."..."]: remove those entries too if you like)
+rm -f ~/.claude/commands/{listen,wait,unlisten}.md
+# older installs also left ~/.codex/prompts/{listen,wait,unlisten}.md (now moved to *.bak-agency-board-<ts> by connect.sh): delete those too
 rm -rf ~/.agents/skills/listen ~/.agents/skills/wait ~/.agents/skills/unlisten
 rm -rf ~/.agency-board
 ```
@@ -350,7 +356,7 @@ The Mac must be awake to poll. The installer does not change power settings. Opt
 An agent that finishes a board task does not stop at once: for a short window it keeps checking the board for
 new work handed to it, then stops. It is not always-on: a normal reply never lingers, and the window ends by itself.
 
-How it works (macOS / Linux; Claude Code, and Codex once its hooks are trusted):
+How it works (macOS / Linux; Claude Code, and Codex once its hooks are trusted via "Trust all and continue" or `/hooks`):
 
 1. `PostToolUse` on `mcp__agency-board__complete_task` runs `linger.sh mark`, which writes a marker
    `~/.agency-board/linger/<agent>-<session_id>`.
@@ -422,6 +428,9 @@ one script (`~/.agency-board/linger.sh`), one `Stop` hook, no extra loop or daem
 | `/wait` | Session polls and only alerts your user when a task handed to it arrives (and on stale alerts). It never claims or works (R2, R3). `linger.sh arm <agent> wait` |
 | `/unlisten` | Turns either mode off for this session. `linger.sh disarm <agent> [session-id]`; without an id it removes every session state of that agent on this machine |
 
+Claude Code runs `arm` / `disarm` from the slash command (`!` line). Codex runs them from the `UserPromptSubmit` hook
+(`linger.sh prompt codex`), written as `$listen`, `$wait`, `$unlisten` (see "Codex differences").
+
 - **Open-ended**: no window. The mode lasts until `/unlisten` or Esc. Esc kills the hook (TERM/INT/HUP); the trap removes
   the session state, so Esc also turns the mode off. `/unlisten` from another terminal is seen within one tick
   (state file gone; sleep is chunked in `AGENCY_BOARD_LISTEN_TICK` seconds, default 5).
@@ -448,21 +457,41 @@ one script (`~/.agency-board/linger.sh`), one `Stop` hook, no extra loop or daem
 - **Token cost**: each poll is one HTTP request outside the model; a model turn only happens on a hit. The 30 min default
   keeps the idle cost at about 2 requests per hour per armed session.
 
-Codex differences (not testable here: no Codex CLI in the build environment; the install and the hook logic are covered by
-script tests only, a real Codex session was not run):
+Codex differences (verified 2026-10-14 on codex-cli 0.162.0-alpha.17.2: a real `codex exec` under the default sandbox arms with `$listen` and disarms with `$unlisten`, and the sandbox still cannot write the token files; the automated tests are hermetic and run no Codex):
 
-- Custom prompts (`~/.codex/prompts/{listen,wait,unlisten}.md`, invoked `/prompts:listen`) are deprecated by OpenAI but still
-  read; they cannot run shell commands themselves, so the prompt text tells the model to run
-  `sh ~/.agency-board/linger.sh arm codex <mode>`. Skills (`~/.agents/skills/{listen,wait,unlisten}/SKILL.md`, invoked
-  `$listen` or `/skills`) are installed as the supported equivalent. Both only when a codex token and `~/.codex` exist.
-- Codex gives the command no session id (the docs name no session-id env var), so `arm` writes
-  `~/.agency-board/listen/codex-pending`; the next `Stop` of that agent with a pending file younger than 300 s binds it to its
-  own `session_id`. Two Codex sessions arming within 300 s can bind to the wrong one.
+- **Why a hook**: Codex's default sandbox forbids writes to `~/.agency-board` ("Operation not permitted", reproduced with
+  `codex sandbox -- mkdir`), so a skill that told the model to run `sh ~/.agency-board/linger.sh arm codex listen` failed with
+  "~/.agency-board/listen could not be created". Hooks run outside the sandbox. Tokens and state files therefore stay
+  unwritable from the sandbox: no `config.toml` change, no extra writable root.
+- **`UserPromptSubmit` hook** `sh ~/.agency-board/linger.sh prompt codex`: stdin JSON has `session_id` and the raw `prompt`
+  (`$name` is not expanded; it also fires in `codex exec`). Only the first token of the prompt counts: exactly `$listen`,
+  `$wait` or `$unlisten` (case sensitive; leading spaces and newlines skipped). `$listen` / `$wait` arm with the hook's real
+  `session_id` (state `listen/codex-<session_id>`, same `arm` code and status line as Claude, slider rules included).
+  `$unlisten` turns off EVERY codex session on this machine, not only its own: while the Stop hook loops, Codex queues
+  a typed prompt until the turn ends, so the realistic ways to stop are Esc (Interrupt hook, own session) or `$unlisten`
+  from another Codex session or terminal. Any other prompt (including `$listen` later in the text, `/listen`, empty) exits at
+  once: no output, no file, no network call, no log line, because the hook fires on every prompt including the launchd
+  worker's. A match prints one JSON line with `hookSpecificOutput.additionalContext` and `systemMessage` (both the status
+  line, starting `agency-board:`); the model reads it from its context. Needs no `AGENCY_BOARD_TOKEN_CODEX`; the poll uses
+  `~/.agency-board/codex.token`.
+- **Skills** (`~/.agents/skills/{listen,wait,unlisten}/SKILL.md`) run no command. They tell the model that the hook already
+  switched the mode, to read the `agency-board:` line, and, if there is none or it says OFF / not started, to tell your user (no
+  line = hook not active: `/hooks`, trust, or rerun `connect.sh --hooks-only`) and stop. They forbid starting or stopping the
+  mode with a shell command. Only when a codex token and `~/.codex` exist.
+- **Custom prompts retired**: `/prompts:<name>` is not recognized by codex-cli 0.162 ("Unrecognized command"), and the
+  sandbox blocked their shell command anyway. `connect.sh` no longer installs them; a marked file from an older install is
+  moved to `<file>.bak-agency-board-<ts>`; an unmarked one is yours and untouched.
+- **Trust**: new or changed hooks need review. Codex shows "Hooks need review" at start: choose "Trust all and continue", or
+  review in `/hooks`. The decision is stored in `~/.codex/config.toml` as `[hooks.state."<hooks.json>:<event>:<i>:<j>"]
+  trusted_hash`. Untrusted, `$listen` does nothing and the skill says so. Never use `--dangerously-bypass-hook-trust`.
+- **Session id**: the hook input carries it, so the old "pending file binds at the next Stop" race is gone for Codex. Fallback only:
+  if the id is missing or not a safe file name, `$listen` / `$wait` write `~/.agency-board/listen/codex-pending`; the next
+  `Stop` of that agent with a pending file younger than 300 s binds it to its own `session_id` (two Codex sessions arming
+  within 300 s can then bind to the wrong one). `linger.sh arm codex <mode>` from a normal terminal still works the same way.
 - An `Interrupt` hook (`linger.sh interrupt codex`, reads `session_id` from stdin, silent) is the Esc equivalent. The event is
-  documented but untested; if it never fires, stop with `/unlisten` (`$unlisten`).
-- New Codex hooks need one-time trust: run `/hooks` in Codex.
-- Sources (2026-10-13): custom prompts (deprecated) https://developers.openai.com/codex/custom-prompts ; hooks (Stop, Interrupt,
-  `~/.codex/hooks.json`, `session_id`, `/hooks` trust) https://developers.openai.com/codex/hooks ; skills (`$HOME/.agents/skills`,
+  documented but untested; if it never fires, stop with `$unlisten`.
+- Sources (2026-10-14): hooks (Stop, Interrupt, UserPromptSubmit, `~/.codex/hooks.json`, `session_id`, `/hooks` trust)
+  https://developers.openai.com/codex/hooks ; custom prompts (deprecated, dead on 0.162) https://developers.openai.com/codex/custom-prompts ; skills (`$HOME/.agents/skills`,
   `$name`, `/skills`) https://developers.openai.com/codex/build-skills ; Claude Code commands (`~/.claude/commands/*.md`, `!`
   injection, `${CLAUDE_SESSION_ID}`, `allowed-tools`) https://code.claude.com/docs/en/skills .
 
