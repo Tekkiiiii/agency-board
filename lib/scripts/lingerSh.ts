@@ -81,6 +81,15 @@ num() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
 clean_sid() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-80; }
 valid_sid() { [ -n "$1" ] && [ "$(clean_sid "$1")" = "$1" ]; }
 
+# ab_auth <token>: prints the curl config line that carries the bearer token. Use it as: ab_auth "$T" | curl -K - ... URL
+# The token travels on curl's STDIN (printf is a shell builtin, curl reads the config from the pipe), so it is never in any
+# process argv (ps shows argv of every process to every local user). A token with a char outside the real token alphabet
+# (quote, backslash, space, newline) would break out of the config line: it is refused, no header is sent (the server answers 401).
+ab_auth() {
+  case "$1" in ''|*[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+  printf 'header = "Authorization: Bearer %s"\n' "$1" 2>/dev/null
+}
+
 # arm_do / disarm_do: the bodies of the arm and disarm modes, also used by the Codex prompt hook; each prints ONE status line.
 # They need no AGENCY_BOARD_TOKEN_CODEX: the poll in arm_do uses the token file. Nothing here exits the script (return only).
 arm_do() { # <listen|wait> [session-id]
@@ -92,7 +101,7 @@ arm_do() { # <listen|wait> [session-id]
   chmod 700 "$LS" 2>/dev/null
   find "$LS" -type f -mtime +2 -exec rm -f {} + 2>/dev/null
   RF=$(mktemp "$LS/poll.XXXXXX" 2>/dev/null) || return 0
-  CODE=$(curl -sS -m 10 -o "$RF" -w '%{http_code}' -H "Authorization: Bearer $T" "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" </dev/null 2>/dev/null)
+  CODE=$(ab_auth "$T" | curl -sS -m 10 -K - -o "$RF" -w '%{http_code}' "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" 2>/dev/null)
   LMIN=30
   NOTE=''
   case "$CODE" in
@@ -136,14 +145,21 @@ disarm_do() { # [session-id]; no usable id = every session of this agent on this
 if [ "$MODE" = arm ]; then arm_do "$3" "$4"; exit 0; fi
 if [ "$MODE" = disarm ]; then disarm_do "$3"; exit 0; fi
 # prompt: Codex UserPromptSubmit hook. Fires on EVERY Codex prompt (also the launchd worker's), so a prompt that is not
-# exactly $listen / $wait / $unlisten as its first token leaves at once: no output, no file, no network, no log.
+# exactly $listen / $wait / $unlisten (bare, or as a skill link, see PLNK) as its first token leaves at once: no output, no file, no network, no log.
 # Only the first token of the raw prompt is looked at; quotes inside the JSON string are escaped (\"), so text in the
 # prompt can never forge a "session_id" key or the "prompt" key.
 if [ "$MODE" = prompt ]; then
   [ "$AG" = codex ] || exit 0
   IN=$(tr -d '\n')
   case "$IN" in *'"prompt"'*'$'*) ;; *) exit 0 ;; esac
-  PTOK=$(printf '%s' "$IN" | sed -n 's/.*"prompt"[ ]*:[ ]*"\(.*\)$/\1/p' | head -n 1 | sed 's/\\[ntr]/ /g; s/^[ ]*//; s/[ \\"].*//')
+  PREST=$(printf '%s' "$IN" | sed -n 's/.*"prompt"[ ]*:[ ]*"\(.*\)$/\1/p' | head -n 1 | sed 's#\\/#/#g; s/\\[ntr]/ /g; s/^[ ]*//')
+  PTOK=$(printf '%s' "$PREST" | sed 's/[ \\"].*//')
+  # Codex Desktop sends a skill mention as a markdown link, [$listen](<path>/skills/listen/SKILL.md), not a bare token. Accepted as
+  # the first token only when the link text is exactly $<name> and the target (no quote, backslash or ")" inside) ends in
+  # /skills/<same name>/SKILL.md followed at once by the ")". Like the bare token, the link must be followed by whitespace, an
+  # escape or the end of the string: any glued text ("...SKILL.md)x") is a silent no-op. JSON-escaped slashes (\/) are unescaped first.
+  PLNK=$(printf '%s' "$PREST" | sed -n 's/^\[\$\([a-z]*\)\]([^])\\"]*\/skills\/\1\/SKILL\.md)[ \\"].*$/\1/p')
+  if [ -n "$PLNK" ]; then PTOK="\$$PLNK"; fi
   case "$PTOK" in '$listen') PM=listen ;; '$wait') PM=wait ;; '$unlisten') PM=unlisten ;; *) exit 0 ;; esac
   PSID=$(printf '%s' "$IN" | sed 's/"prompt"[ ]*:[ ]*".*//' | sed -n 's/.*"session_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
   [ -n "$PSID" ] || PSID=$(printf '%s' "$IN" | sed -n 's/.*"session_id"[ ]*:[ ]*"\([^"]*\)".*/\1/p' | head -n 1)
@@ -250,7 +266,7 @@ listen_loop() {
     touch "$STATE" 2>/dev/null
     POLLS=$((POLLS + 1))
     RETRY=0
-    CODE=$(curl -sS -m 15 -o "$RF" -w '%{http_code}' -H "Authorization: Bearer $T" "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" </dev/null 2>/dev/null)
+    CODE=$(ab_auth "$T" | curl -sS -m 15 -K - -o "$RF" -w '%{http_code}' "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" 2>/dev/null)
     case "$CODE" in
       401|403) log "poll $POLLS: HTTP $CODE; stop (mode stays armed)"; rm -f "$RF"; exit 0 ;;
       2??)
@@ -388,7 +404,7 @@ POLLS=0
 FAILS=0
 while :; do
   POLLS=$((POLLS + 1))
-  CODE=$(curl -sS -m 15 -o "$RF" -w '%{http_code}' -H "Authorization: Bearer $T" "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" </dev/null 2>/dev/null)
+  CODE=$(ab_auth "$T" | curl -sS -m 15 -K - -o "$RF" -w '%{http_code}' "@AGENCY_BOARD_API_BASE@/api/v1/tasks?mine=1&status=open" 2>/dev/null)
   case "$CODE" in
     401|403) log "poll $POLLS: HTTP $CODE; stop"; rm -f "$RF"; exit 0 ;;
     2??)

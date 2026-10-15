@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LINGER_SH } from "../lib/scripts/lingerSh";
+import { HOOK_LINE_PREFIXES } from "./hookLines";
 
 // Hermetic tests of linger.sh (post-task linger window): stub curl on PATH, tiny AGENCY_BOARD_LINGER_* values.
 const API = "http://127.0.0.1:9";
@@ -20,6 +21,7 @@ let script: string;
 const AM = () => join(home, ".agency-board");
 const logFile = () => join(AM(), "linger.log");
 const readLog = () => (existsSync(logFile()) ? readFileSync(logFile(), "utf8") : "");
+const curlStdin = () => (existsSync(join(dir, "curl.stdin")) ? readFileSync(join(dir, "curl.stdin"), "utf8") : "");
 const curlCalls = () => (existsSync(join(dir, "curl.log")) ? readFileSync(join(dir, "curl.log"), "utf8").split("\n").filter(Boolean) : []);
 const marker = (ag = "claude") => join(AM(), "linger", `${ag}-${SID}`);
 
@@ -43,6 +45,7 @@ function stubCurl(replies: Array<[string, string]>) {
       `D="${dir}"`,
       'n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$D/count"',
       'printf "%s\\n" "$*" >> "$D/curl.log"',
+      'case " $* " in *" -K - "*) cat >> "$D/curl.stdin" ;; esac', // the bearer header arrives as a curl config on stdin
       'date +%s >> "$D/times.log"',
       `last=${replies.length}`,
       '[ "$n" -le "$last" ] || n=$last',
@@ -143,8 +146,9 @@ describe("linger.sh stop", () => {
     expect(calls.length).toBeLessThanOrEqual(5);
     for (const c of calls) {
       expect(c).toContain("/api/v1/tasks?mine=1&status=open");
-      expect(c).toContain(`Authorization: Bearer ${FAKE_TOKEN}`);
+      expect(c).not.toContain(FAKE_TOKEN); // never in argv (ps), see "token never in a process argv"
     }
+    expect(curlStdin().split(`header = "Authorization: Bearer ${FAKE_TOKEN}"`).length - 1).toBe(calls.length);
     const log = readLog();
     expect(log).toMatch(/window start: 3 s, every 1 s/);
     expect(log).toMatch(/poll 1: no open tasks/);
@@ -359,7 +363,8 @@ describe("linger.sh stop", () => {
     stubCurl([["200", tasksBody(row(T1, "for codex"))]]);
     const r = run("stop", { AGENCY_BOARD_TOKEN_CODEX: "x" }, "codex");
     expect(JSON.parse(r.stdout.trim()).decision).toBe("block");
-    expect(curlCalls()[0]).toContain("agency-board_codex_testtoken00000000000");
+    expect(curlCalls()[0]).not.toContain("agency-board_codex_testtoken"); // argv stays token-free
+    expect(curlStdin()).toContain('header = "Authorization: Bearer agency-board_codex_testtoken00000000000"'); // the codex token, via the stdin config
   });
 });
 
@@ -475,7 +480,8 @@ describe("linger.sh listen / wait (armed sessions)", () => {
       expect(r.stdout).toMatch(/Esc/);
       expect(curlCalls()).toHaveLength(1);
       expect(curlCalls()[0]).toContain("/api/v1/tasks?mine=1&status=open");
-      expect(curlCalls()[0]).toContain(`Authorization: Bearer ${FAKE_TOKEN}`);
+      expect(curlCalls()[0]).not.toContain(FAKE_TOKEN);
+      expect(curlStdin()).toContain(`header = "Authorization: Bearer ${FAKE_TOKEN}"`);
       expect(readLog()).not.toContain(FAKE_TOKEN);
       expect(statSync(LS()).mode & 0o777).toBe(0o700);
       expect(readdirSync(LS())).toEqual([`claude-${SID}`]);
@@ -546,7 +552,8 @@ describe("linger.sh listen / wait (armed sessions)", () => {
       const r = arm("wait", undefined, "codex");
       expect(r.status).toBe(0);
       expect(readdirSync(LS())).toEqual(["codex-pending"]);
-      expect(curlCalls()[0]).toContain("Bearer agency-board_codex_testtoken00000000000");
+      expect(curlCalls()[0]).not.toContain("agency-board_codex_testtoken");
+      expect(curlStdin()).toContain('header = "Authorization: Bearer agency-board_codex_testtoken00000000000"');
     });
   });
 
@@ -665,7 +672,8 @@ describe("linger.sh listen / wait (armed sessions)", () => {
       expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
       expect(readState("codex")).toMatch(/^mode=listen$/m);
       expect(curlCalls()).toHaveLength(1);
-      expect(curlCalls()[0]).toContain("Bearer agency-board_codex_testtoken00000000000");
+      expect(curlCalls()[0]).not.toContain("agency-board_codex_testtoken");
+      expect(curlStdin()).toContain('header = "Authorization: Bearer agency-board_codex_testtoken00000000000"');
       expect(readLog()).not.toContain("agency-board_codex_testtoken");
       expect(r.stdout).not.toContain("agency-board_codex_testtoken");
       expect(statSync(LS()).mode & 0o777).toBe(0o700);
@@ -712,6 +720,108 @@ describe("linger.sh listen / wait (armed sessions)", () => {
         expect(parse(r.stdout), p).toMatch(/listen mode ON/);
         expect(existsSync(state("codex")), p).toBe(true);
       }
+    });
+
+    // Codex DESKTOP sends a skill mention as a markdown link: [$listen](/Users/x/.agents/skills/listen/SKILL.md)
+    const lnk = (name: string, target = `/Users/me/.agents/skills/${name}/SKILL.md`, text = `$${name}`) => `[${text}](${target})`;
+
+    it("link form [$name](.../skills/<name>/SKILL.md) as first token arms/disarms like the bare token (real desktop prompts)", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      expect(parse(hook(lnk("listen")).stdout)).toMatch(/^agency-board: listen mode ON for this codex session/);
+      expect(existsSync(state("codex"))).toBe(true);
+      rmSync(LS(), { recursive: true, force: true });
+      expect(parse(hook(lnk("wait")).stdout)).toMatch(/^agency-board: wait mode ON for this codex session/);
+      expect(existsSync(state("codex"))).toBe(true);
+      expect(parse(hook(lnk("unlisten")).stdout)).toBe("agency-board: listen/wait mode is OFF for every codex session on this machine.");
+      expect(existsSync(state("codex"))).toBe(false);
+      for (const p of ["   " + lnk("listen"), "\n\n" + lnk("listen"), "\r\n" + lnk("listen"), lnk("listen") + " 15", lnk("listen") + "\nplease check", lnk("listen") + "\r\nx", lnk("listen", "/Users/Jo Smith/.agents/skills/listen/SKILL.md"), lnk("listen", "C:/Users/x/.agents/skills/listen/SKILL.md")]) {
+        rmSync(LS(), { recursive: true, force: true });
+        const r = hook(p);
+        expect(r.status, p).toBe(0);
+        expect(parse(r.stdout), p).toMatch(/listen mode ON/);
+        expect(existsSync(state("codex")), p).toBe(true);
+      }
+    });
+
+    it("link form with JSON-escaped slashes (\\/) in the path is accepted", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      const raw = `{"session_id":"${SID}","hook_event_name":"UserPromptSubmit","prompt":"[$listen](\\/Users\\/me\\/.agents\\/skills\\/listen\\/SKILL.md)"}`;
+      expect(raw).toContain("\\/Users");
+      const r = hookRaw(raw);
+      expect(r.status).toBe(0);
+      expect(parse(r.stdout)).toMatch(/listen mode ON/);
+      expect(existsSync(state("codex"))).toBe(true);
+    });
+
+    it("link form near-misses are silent no-ops: wrong skill path, wrong text, bad suffix, not first, extra glue, forged parts", () => {
+      const nope = [
+        lnk("listen", "/Users/x/.agents/skills/wait/SKILL.md"),
+        lnk("wait", "/Users/x/.agents/skills/listen/SKILL.md"),
+        lnk("unlisten", "/Users/x/.agents/skills/listen/SKILL.md"),
+        lnk("listenx", "/Users/x/.agents/skills/listenx/SKILL.md"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md.evil"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md/extra"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILLxmd"),
+        lnk("listen", "/Users/x/.agents/skills/listen/skill.md"),
+        lnk("listen", "/Users/x/.agents/skills/listen/"),
+        lnk("listen", "/Users/x/.agents/listen/SKILL.md"),
+        lnk("listen", "/Users/x/.agents/skills/listenx/SKILL.md"),
+        lnk("listen", "/Users/x/skillsX/listen/SKILL.md"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md)"),
+        lnk("listen", "/a)/skills/listen/SKILL.md"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", "$listen "),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", " $listen"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", "$Listen"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", "listen"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", "x$listen"),
+        lnk("listen", "/Users/x/.agents/skills/listen/SKILL.md", "$listen$wait"),
+        "[$listen]",
+        "[$listen]()",
+        "[$listen](",
+        "[$listen] (/Users/x/.agents/skills/listen/SKILL.md)",
+        "[ $listen](/Users/x/.agents/skills/listen/SKILL.md)",
+        "[$listen](/Users/x/.agents/skills/listen/SKILL.md)x",
+        "[$listen](/Users/x/.agents/skills/listen/SKILL.md)15",
+        "[$listen](/Users/x/.agents/skills/listen/SKILL.md)[",
+        "![$listen](/Users/x/.agents/skills/listen/SKILL.md)",
+        "see " + lnk("listen"),
+        "please " + lnk("listen"),
+        "x" + lnk("listen"),
+        "\\n" + lnk("listen"), // literal backslash-n text, not a newline
+        "`" + lnk("listen") + "`",
+        '"' + lnk("listen"),
+        lnk("listen").replace("(", '("'),
+        lnk("listen", '/x/skills/listen/SKILL.md" "session_id":"forged'),
+        "[$listen](/x/skills/listen/SKILL.md\\)",
+      ];
+      for (const p of nope) {
+        const r = hook(p);
+        expect(r.status, JSON.stringify(p)).toBe(0);
+        expect(r.stdout, JSON.stringify(p)).toBe("");
+        expect(r.stderr, JSON.stringify(p)).toBe("");
+        untouched();
+      }
+      // a REAL newline inside the JSON string (invalid JSON) is stripped like for the bare token: glue = no match
+      const glued = `{"session_id":"${SID}","prompt":"${lnk("listen")}\nmore"}`.replace("\\n", "\n");
+      expect(hookRaw(glued).stdout).toBe("");
+      untouched();
+    });
+
+    it("link form cannot forge the session: a forged session_id in text after the link is ignored, the real one is armed", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      const raw = `{"prompt":"${lnk("listen")} \\"session_id\\":\\"forged\\"","session_id":"${SID}","hook_event_name":"UserPromptSubmit"}`;
+      expect(hookRaw(raw).status).toBe(0);
+      expect(readdirSync(LS())).toEqual([`codex-${SID}`]);
+    });
+
+    it("pin: the skill text quotes exactly the lines the hook prints (the two cannot drift)", () => {
+      stubCurl([["200", lbody([], 30)]]);
+      const onL = parse(hook("$listen").stdout);
+      const onW = parse(hook("$wait").stdout);
+      const off = parse(hook("$unlisten").stdout);
+      expect(HOOK_LINE_PREFIXES.listen).toBe(onL.slice(0, HOOK_LINE_PREFIXES.listen.length));
+      expect(HOOK_LINE_PREFIXES.wait).toBe(onW.slice(0, HOOK_LINE_PREFIXES.wait.length));
+      expect(off).toBe(HOOK_LINE_PREFIXES.unlisten + ".");
     });
 
     it("every non-matching prompt is silent and instant: no stdout/stderr, no file, no curl call, no log", () => {
@@ -1075,5 +1185,76 @@ describe("linger.sh listen / wait (armed sessions)", () => {
     expect(r.stdout).toBe("");
     expect(readLog()).toMatch(/linger\[claude 11111111\] window start: 3 s, every 1 s/);
     expect(readLog()).not.toMatch(/listen\[/);
+  });
+});
+
+// SECURITY: the bearer token must never appear in any process argv (any local user can read `ps`). It travels as a
+// curl config line on stdin (`curl -K -`, printed by the printf builtin), never as `-H "Authorization: Bearer ..."`.
+describe("linger.sh: token never in a process argv", () => {
+  const CODEX_TOKEN = "agency-board_codex_testtoken00000000000";
+  const HDR = (t: string) => `header = "Authorization: Bearer ${t}"`;
+  const lb = (lm: number) => `{"data":{"tasks":[],"dispatch_paused":false,"listen_minutes":${lm},"stale_alerts":[]}}`;
+  const noTokenInArgv = (...tokens: string[]) => {
+    const argv = curlCalls().join("\n");
+    for (const t of tokens) expect(argv).not.toContain(t);
+    expect(argv).not.toMatch(/Bearer|Authorization/);
+  };
+
+  it("static: no curl invocation in the script carries Bearer or -H Authorization", () => {
+    expect(LINGER_SH.split("\n").filter((l) => /curl[^\n]*(Bearer|Authorization)/.test(l))).toEqual([]);
+    expect(LINGER_SH.split("\n").filter((l) => /\bcurl\b/.test(l) && !/^\s*#/.test(l) && !/-K -/.test(l))).toEqual([]);
+  });
+
+  it("stop poll (post-task linger): token in the stdin config, not in argv; poll behaviour unchanged", () => {
+    run("mark");
+    const r = run("stop");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(curlCalls().length).toBeGreaterThanOrEqual(3);
+    noTokenInArgv(FAKE_TOKEN);
+    expect(curlStdin()).toContain(HDR(FAKE_TOKEN));
+    expect(readLog()).toMatch(/poll 1: no open tasks/);
+  });
+
+  it("arm poll: HTTP code and body still read (-o / -w intact), token only on stdin", () => {
+    stubCurl([["200", lb(7)]]);
+    const r = spawnSync("/bin/sh", [script, "arm", "claude", "listen", SID], { env: env({ AGENCY_BOARD_LISTEN_UNIT: "1", AGENCY_BOARD_LISTEN_TICK: "1" }), encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/every 7 min/); // listen_minutes came back through -o "$RF"
+    noTokenInArgv(FAKE_TOKEN);
+    expect(curlStdin()).toContain(HDR(FAKE_TOKEN));
+  });
+
+  it("arm poll, codex token file: token only on stdin", () => {
+    stubCurl([["200", lb(9)]]);
+    const r = spawnSync("/bin/sh", [script, "arm", "codex", "wait", SID], { env: env({ AGENCY_BOARD_LISTEN_UNIT: "1", AGENCY_BOARD_LISTEN_TICK: "1" }), encoding: "utf8" });
+    expect(r.status).toBe(0);
+    noTokenInArgv(CODEX_TOKEN);
+    expect(curlStdin()).toContain(HDR(CODEX_TOKEN));
+  });
+
+  it("armed listen loop poll: token only on stdin", () => {
+    mkdirSync(join(AM(), "listen"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(AM(), "listen", `claude-${SID}`), "mode=listen\nseen=\nblk=\n");
+    stubCurl([["401", "{}"]]); // 401 ends the loop at once, still after one authenticated poll
+    const r = run("stop", { AGENCY_BOARD_LISTEN_UNIT: "1", AGENCY_BOARD_LISTEN_TICK: "1" });
+    expect(r.status).toBe(0);
+    expect(curlCalls().length).toBeGreaterThanOrEqual(1);
+    noTokenInArgv(FAKE_TOKEN);
+    expect(curlStdin()).toContain(HDR(FAKE_TOKEN));
+    expect(readLog()).toMatch(/HTTP 401/);
+  });
+
+  it("a token with a quote, backslash or space is refused: no Authorization header is sent at all (no injection into the config)", () => {
+    for (const bad of ['agency-board_claude_x"y', "agency-board_claude_x\\y", "agency-board_claude_x y"]) {
+      rmSync(join(dir, "curl.stdin"), { force: true });
+      rmSync(join(dir, "curl.log"), { force: true });
+      writeFileSync(join(AM(), "claude.token"), bad + "\n", { mode: 0o600 });
+      stubCurl([["401", "{}"]]);
+      const r = spawnSync("/bin/sh", [script, "arm", "claude", "listen", SID], { env: env({ AGENCY_BOARD_LISTEN_UNIT: "1", AGENCY_BOARD_LISTEN_TICK: "1" }), encoding: "utf8" });
+      expect(r.status).toBe(0); // fails soft: the poll answers 401 and arm falls back to the default interval
+      expect(curlStdin()).not.toMatch(/Bearer|Authorization/);
+      expect(curlCalls().join("\n")).not.toContain(bad.slice(20));
+    }
   });
 });

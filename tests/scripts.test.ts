@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tokenPrefixLength } from "../lib/auth";
 import { CONNECT_SH } from "../lib/scripts/connectSh";
+import { HOOK_LINE_PREFIXES } from "./hookLines";
 import { CONNECT_PS1 } from "../lib/scripts/connectPs1";
+import { LINGER_SH } from "../lib/scripts/lingerSh";
+import * as connectShMod from "../lib/scripts/connectSh";
+import * as connectPs1Mod from "../lib/scripts/connectPs1";
+import * as lingerShMod from "../lib/scripts/lingerSh";
+import * as workerMjsMod from "../lib/scripts/workerMjs";
 
 // Fails fast if anything ever dials it (port 9 = discard, nothing listens), and the
 // stub curl below never touches the network anyway.
@@ -66,7 +72,7 @@ describe("heartbeat.sh (written by connect.sh)", () => {
     expect(inbox).toHaveLength(1);
     expect(inbox[0]).toMatch(/curl -fsS -m 3 /);
     expect(inbox[0]).toContain("?format=text");
-    expect(hb).toMatch(/if \[ "\$1" = session-start \]; then\n\s+if \[ -s "\$HOME\/\.agency-board\/guide\.txt" \]; then echo "[^"\n]*guide\.txt"; fi\n\s+curl -fsS -m 3 [^\n]*\/api\/v1\/inbox\?format=text[^\n]*\|\| true\nfi/);
+    expect(hb).toMatch(/if \[ "\$1" = session-start \]; then\n\s+if \[ -s "\$HOME\/\.agency-board\/guide\.txt" \]; then echo "[^"\n]*guide\.txt"; fi\n\s+ab_auth "\$T" \| curl -fsS -m 3 -K - [^\n]*\/api\/v1\/inbox\?format=text[^\n]*\|\| true\nfi/);
     // the guide is only pointed at (one line), never dumped into the session
     expect(hb).not.toMatch(/cat [^\n]*guide\.txt/);
     expect(hb.trimEnd().split("\n").pop()).toBe("exit 0");
@@ -200,7 +206,8 @@ describe("connect.sh --hooks-only", () => {
     const r = run(["--", "--hooks-only"]);
     expect(r.status, r.stderr).toBe(0);
     expect(readFileSync(join(home, ".agency-board", "guide.txt"), "utf8")).toBe("GUIDE BODY LINE\n");
-    expect(calls()).toMatch(/^curl .*Authorization: Bearer agency-board_claude_.*\/api\/v1\/guide\?format=text$/m);
+    expect(calls()).toMatch(/^curl .*-K - .*\/api\/v1\/guide\?format=text$/m); // token rides on stdin, not argv
+    expect(calls()).not.toContain(FAKE_TOKEN);
     stub("curl", 'case "$*" in *inbox*) echo "agency-board: no pending tasks" ;; esac\nexit 0');
     const hb = join(home, ".agency-board", "heartbeat.sh");
     const start = spawnSync("/bin/sh", [hb, "session-start"], { env: env(), encoding: "utf8" });
@@ -667,10 +674,10 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r.stderr).toMatch(/could not add claude hooks/);
   });
 
-  it("codex: with a codex token and ~/.codex, merges only the linger hooks into hooks.json (existing hooks kept, idempotent, trust note)", () => {
+  it("codex: with a codex token and ~/.codex, merges the SessionStart + linger hooks into hooks.json (existing hooks kept, idempotent, trust note)", () => {
     writeTokens(true);
     mkdirSync(join(home, ".codex"));
-    const old = { hooks: { SessionStart: [{ matcher: "startup|resume", hooks: [{ type: "command", command: "/bin/sh /x/codex-session-start.sh" }] }] } };
+    const old = { hooks: { SessionStart: [{ matcher: "startup|resume", hooks: [{ type: "command", command: "/bin/sh /x/some-user-hook.sh" }] }] } };
     writeFileSync(CHJ(), JSON.stringify(old, null, 2) + "\n");
     const r1 = run(["--", "--hooks-only"]);
     expect(r1.status, r1.stderr).toBe(0);
@@ -679,14 +686,14 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r1.stdout).toMatch(/\/hooks/);
     expect(r1.stdout).not.toMatch(/run \/hooks in Codex and trust the agency-board linger hooks/); // old wording
     const h = readJson(CHJ());
-    expect(cmds(h, "SessionStart")).toEqual(["/bin/sh /x/codex-session-start.sh"]);
+    expect(cmds(h, "SessionStart")).toEqual(["/bin/sh /x/some-user-hook.sh", "sh ~/.agency-board/heartbeat.sh session-start codex"]); // user hook kept, managed one added
     expect(cmds(h, "UserPromptSubmit")).toEqual(["sh ~/.agency-board/linger.sh prompt codex"]); // arms $listen/$wait/$unlisten outside the sandbox
     expect(h.hooks.UserPromptSubmit[0].matcher).toBe("");
     expect(cmds(h, "Stop")).toEqual(["sh ~/.agency-board/linger.sh stop codex"]);
     expect(cmds(h, "PostToolUse")).toEqual(["sh ~/.agency-board/linger.sh mark codex", "sh ~/.agency-board/linger.sh kick codex"]);
     expect(h.hooks.PostToolUse[0].matcher).toBe("mcp__agency-board__complete_task");
     expect(h.hooks.Stop[0].hooks[0].timeout).toBe(86400);
-    expect(JSON.stringify(h)).not.toContain("heartbeat");
+    expect(JSON.stringify(h)).not.toContain("heartbeat.sh stop");
     const once = readFileSync(CHJ(), "utf8");
     const r2 = run(["--", "--hooks-only"]);
     expect(r2.status, r2.stderr).toBe(0);
@@ -694,6 +701,58 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r2.stdout).not.toMatch(/trust/i);
     expect(r2.stdout).not.toMatch(/Hooks need review/);
     expect(baks(join(home, ".codex"), "hooks.json")).toHaveLength(1);
+  });
+
+  describe("codex SessionStart hook is managed by connect.sh (heartbeat.sh session-start codex)", () => {
+    it("a codex install gets the managed SessionStart hook (startup|resume, statusMessage, context limit); other events untouched", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      const h = readJson(CHJ());
+      expect(cmds(h, "SessionStart")).toEqual(["sh ~/.agency-board/heartbeat.sh session-start codex"]);
+      expect(h.hooks.SessionStart).toHaveLength(1);
+      expect(h.hooks.SessionStart[0].matcher).toBe("startup|resume");
+      expect(h.hooks.SessionStart[0].hooks[0].statusMessage).toBe("Loading agency-board tasks");
+      expect(h.hooks.SessionStart[0].hooks[0].additionalContextLimit).toBe(5000);
+      expect(cmds(h, "UserPromptSubmit")).toEqual(["sh ~/.agency-board/linger.sh prompt codex"]);
+      expect(cmds(h, "Interrupt")).toEqual(["sh ~/.agency-board/linger.sh interrupt codex"]);
+    });
+
+    it("is idempotent: a second run changes nothing and adds no duplicate SessionStart entry", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      const once = readFileSync(CHJ(), "utf8");
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      expect(readFileSync(CHJ(), "utf8")).toBe(once);
+      expect(readJson(CHJ()).hooks.SessionStart).toHaveLength(1);
+    });
+
+    it("the hook prints pending tasks from codex.token (not claude.token), token only on curl stdin, silent + exit 0 on failure", () => {
+      writeTokens(true);
+      mkdirSync(join(home, ".codex"));
+      expect(run(["--", "--hooks-only"]).status).toBe(0);
+      const SEC = "agency-board_codex_SECRETSECRET0123456789abcdef";
+      writeFileSync(join(AMD(), "codex.token"), SEC + "\n");
+      const log = join(dir, "curl.log");
+      stub("curl", `printf '%s\\n' "$*" >> "${log}"\ncase " $* " in *" -K - "*) cat >> "${log}.in" ;; esac\ncase "$*" in *inbox*) echo "agency-board: 1 pending task(s) for codex@m" ;; esac\nexit 0`);
+      const ok = spawnSync("/bin/sh", [join(AMD(), "heartbeat.sh"), "session-start", "codex"], { env: env(), encoding: "utf8" });
+      expect(ok.status).toBe(0);
+      expect(ok.stdout).toContain("agency-board: 1 pending task(s) for codex@m");
+      expect(readFileSync(log, "utf8")).not.toContain(SEC);
+      expect(readFileSync(log, "utf8")).not.toMatch(/Bearer|Authorization/);
+      expect(readFileSync(log + ".in", "utf8")).toContain(`Bearer ${SEC}`);
+      expect(readFileSync(log + ".in", "utf8")).not.toContain(FAKE_TOKEN); // the claude token is not used in codex mode
+      stub("curl", "exit 7");
+      const bad = spawnSync("/bin/sh", [join(AMD(), "heartbeat.sh"), "session-start", "codex"], { env: env(), encoding: "utf8" });
+      expect(bad.status).toBe(0);
+      expect(bad.stdout).not.toMatch(/pending task/);
+      expect(bad.stderr).toBe("");
+      // unknown agent word or missing token: silent no-op, never a path escape
+      const odd = spawnSync("/bin/sh", [join(AMD(), "heartbeat.sh"), "session-start", "../x"], { env: env(), encoding: "utf8" });
+      expect(odd.status).toBe(0);
+      expect(odd.stdout).toBe("");
+    });
   });
 
   it("codex: no ~/.codex dir or no codex token means no hooks.json is created", () => {
@@ -892,6 +951,18 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
         expect(k).toMatch(new RegExp(`^name: ${name}$`, "m"));
         expect(k).toMatch(/^description: .+/m);
       }
+      // the skill may confirm ON/OFF only when the hook's exact line is in context; otherwise it must say NOT started + /hooks
+      const sk = (n: string) => readFileSync(join(CSKILLS(), n, "SKILL.md"), "utf8");
+      expect(sk("listen")).toContain(`"${HOOK_LINE_PREFIXES.listen}"`);
+      expect(sk("listen")).toContain("listen mode did NOT start");
+      expect(sk("wait")).toContain(`"${HOOK_LINE_PREFIXES.wait}"`);
+      expect(sk("wait")).toContain("wait mode did NOT start");
+      expect(sk("unlisten")).toContain(`"${HOOK_LINE_PREFIXES.unlisten}"`);
+      expect(sk("unlisten")).toContain("was NOT turned off");
+      for (const n of ["listen", "wait", "unlisten"]) {
+        expect(sk(n), n).toMatch(/only if/i);
+        expect(sk(n), n).toContain("/hooks");
+      }
       const kl = readFileSync(join(CSKILLS(), "listen", "SKILL.md"), "utf8");
       expect(kl).toMatch(/list_tasks/);
       expect(kl).toMatch(/R2/);
@@ -987,5 +1058,167 @@ describe.skipIf(!HAS_OSASCRIPT)("connect.sh linger install (temp HOME, real osas
     expect(r.status, r.stderr).toBe(0);
     expect(existsSync(join(AMD(), "linger.sh"))).toBe(false);
     expect(existsSync(SJ())).toBe(false);
+  });
+});
+
+// SECURITY: the bearer token must never appear in any process argv (any local user can read `ps`). Generated shell
+// scripts hand it to curl as a config line on stdin (`curl -K -`, printed by the printf builtin).
+describe("bearer token never in a process argv", () => {
+  const SRC: Array<[string, string]> = [["connect.sh", CONNECT_SH], ["linger.sh", LINGER_SH], ["connect.ps1", CONNECT_PS1]];
+  // The ONE documented exception: `claude mcp add --header` has no env/stdin form (docs/connect.md "Known limit").
+  const ALLOWED = /claude mcp add/;
+
+  it.each(SRC)("static: %s has no curl line or other argv carrying 'Bearer'/'Authorization' with a token variable", (_n, src) => {
+    const bad = src.split("\n").filter((l) => /\bcurl\b[^\n]*(Bearer|Authorization)/.test(l) && !/^\s*(#|echo|warn|say)/.test(l));
+    expect(bad).toEqual([]);
+    const argvBearer = src.split("\n").filter((l) => /Bearer (\$|"?\s*\+|\$\()/.test(l) && !ALLOWED.test(l) && !/Invoke-WebRequest|\$auth = @\{/.test(l));
+    expect(argvBearer).toEqual([]);
+  });
+
+  it("static: no external command gets a token as an argument (awk -v / tok in argv), except the documented claude mcp add", () => {
+    const bad = CONNECT_SH.split("\n").filter((l) => /\$\(tok /.test(l) && !ALLOWED.test(l) && !/^\s*(#|say|warn|echo)/.test(l) && !/cut -c1-12/.test(l));
+    expect(bad.map((l) => l.trim())).toEqual(['AGENCY_BOARD_V="AGENCY_BOARD_TOKEN_HERMES=$(tok hermes)" awk \'']); // env var, not argv
+    expect(CONNECT_SH).not.toMatch(/awk -v [^\n]*\$\(tok /); // (tokpfx passes only the literal name prefix)
+  });
+
+  it("static: every curl invocation that sends the token uses the -K - config", () => {
+    const authLines = CONNECT_SH.split("\n").filter((l) => /ab_auth/.test(l) && /\bcurl\b/.test(l));
+    expect(authLines.length).toBeGreaterThanOrEqual(5); // heartbeat POST, inbox, guide, linger x3 (spliced in)
+    for (const l of authLines) expect(l).toMatch(/\| curl [^\n]*-K - /);
+  });
+
+  describe("dynamic: fake curl records argv and stdin", () => {
+    let dir: string;
+    let home: string;
+    let bin: string;
+    let script: string;
+    const SECRET = "agency-board_claude_SECRETSECRETSECRET0123456789_-abcdefghi";
+    const argvLog = () => (existsSync(join(dir, "argv.log")) ? readFileSync(join(dir, "argv.log"), "utf8") : "");
+    const stdinLog = () => (existsSync(join(dir, "stdin.log")) ? readFileSync(join(dir, "stdin.log"), "utf8") : "");
+    const env = () => ({ HOME: home, PATH: `${bin}:/usr/bin:/bin` }) as unknown as NodeJS.ProcessEnv;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "ab-tokargv-"));
+      home = join(dir, "home");
+      bin = join(dir, "bin");
+      mkdirSync(join(home, ".agency-board"), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(join(home, ".agency-board", "claude.token"), SECRET + "\n", { mode: 0o600 });
+      script = join(dir, "connect.sh");
+      writeFileSync(script, CONNECT_SH.split("__AGENCY_BOARD_BASE_URL__").join(STUB_BASE));
+      const f = join(bin, "curl");
+      writeFileSync(
+        f,
+        [
+          "#!/bin/sh",
+          `D="${dir}"`,
+          'printf "%s\\n" "$*" >> "$D/argv.log"',
+          'case " $* " in *" -K - "*) cat >> "$D/stdin.log" ;; esac',
+          'out=""; prev=""; for a in "$@"; do if [ "$prev" = -o ]; then out="$a"; fi; prev="$a"; done',
+          'case "$*" in *inbox*) echo "agency-board: no pending tasks" ;; esac',
+          '[ -z "$out" ] || echo "GUIDE" > "$out"',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(f, 0o755);
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    it("connect.sh --hooks-only (guide fetch) and the installed heartbeat.sh (session-start + stop)", () => {
+      const r = spawnSync("/bin/sh", ["-s", "--", "--hooks-only"], { input: readFileSync(script, "utf8"), env: env(), encoding: "utf8" });
+      expect(r.status, r.stderr).toBe(0);
+      expect(readFileSync(join(home, ".agency-board", "guide.txt"), "utf8")).toBe("GUIDE\n"); // -o target still written
+      const hb = join(home, ".agency-board", "heartbeat.sh");
+      const start = spawnSync("/bin/sh", [hb, "session-start"], { env: env(), encoding: "utf8" });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain("agency-board: no pending tasks"); // inbox body still printed
+      expect(start.stderr).toBe("");
+      const stop = spawnSync("/bin/sh", [hb, "stop"], { env: env(), encoding: "utf8" });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toBe("");
+      const argv = argvLog();
+      expect(argv).toContain("/api/v1/heartbeat");
+      expect(argv).toContain("/api/v1/inbox");
+      expect(argv).toContain("/api/v1/guide");
+      expect(argv).not.toContain(SECRET);
+      expect(argv).not.toMatch(/Bearer|Authorization/);
+      // guide + heartbeat + inbox + heartbeat(stop) = 4 authenticated calls, each with the header on stdin
+      expect(stdinLog().split(`header = "Authorization: Bearer ${SECRET}"`).length - 1).toBe(4);
+    });
+
+    it("heartbeat.sh with an unsafe token (quote / backslash): exits 0, silent, sends no Authorization at all", () => {
+      const r0 = spawnSync("/bin/sh", ["-s", "--", "--hooks-only"], { input: readFileSync(script, "utf8"), env: env(), encoding: "utf8" });
+      expect(r0.status, r0.stderr).toBe(0);
+      const hb = join(home, ".agency-board", "heartbeat.sh");
+      for (const bad of ['agency-board_x"y', "agency-board_x\\y"]) {
+        rmSync(join(dir, "stdin.log"), { force: true });
+        rmSync(join(dir, "argv.log"), { force: true });
+        writeFileSync(join(home, ".agency-board", "claude.token"), bad + "\n");
+        const r = spawnSync("/bin/sh", [hb, "session-start"], { env: env(), encoding: "utf8" });
+        expect(r.status).toBe(0);
+        expect(r.stderr).toBe("");
+        expect(stdinLog()).not.toMatch(/Bearer|Authorization/);
+        expect(argvLog()).not.toContain(bad.slice("agency-board_".length));
+      }
+    });
+  });
+});
+
+// SECURITY (regression guard): NO generated script may put a bearer token in a curl argv. Every exported script constant of
+// lib/scripts/* is scanned, so a newly added generated script is covered without editing this test. The only allowlisted
+// exception is the documented `claude mcp add --header` (docs/connect.md "Known limit").
+describe("no generated script puts a bearer token in a curl argv", () => {
+  const MODS: Record<string, Record<string, unknown>> = { connectSh: connectShMod, connectPs1: connectPs1Mod, lingerSh: lingerShMod, workerMjs: workerMjsMod };
+  const SCRIPTS: Array<[string, string]> = [];
+  for (const [mod, ns] of Object.entries(MODS)) for (const [name, v] of Object.entries(ns)) if (typeof v === "string" && v.length > 500) SCRIPTS.push([`${mod}.${name}`, v]);
+  const ALLOWED = /claude mcp add/;
+  /** Logical lines (backslash-newline joined) that hand a bearer to a curl via -H / --header. */
+  function bearerInCurlArgv(src: string): string[] {
+    return src
+      .replace(/\\\n/g, " ")
+      .split("\n")
+      .filter((l) => !ALLOWED.test(l))
+      .filter((l) => /(-H|--header)[ =]+["']?Authorization:\s*Bearer/i.test(l) || (/\bcurl\b/.test(l) && /Authorization:\s*Bearer\s*["']?\s*\$/.test(l) && !/^\s*#/.test(l)));
+  }
+
+  it("covers every generated script constant (guards against the collector silently finding nothing)", () => {
+    const names = SCRIPTS.map(([n]) => n);
+    for (const n of ["connectSh.CONNECT_SH", "connectPs1.CONNECT_PS1", "lingerSh.LINGER_SH", "workerMjs.WORKER_MJS"]) expect(names).toContain(n);
+  });
+
+  it("the detector flags `-H \"Authorization: Bearer $T\"` and `${T}` forms, and ignores the documented claude mcp add", () => {
+    expect(bearerInCurlArgv('curl -fsS -H "Authorization: Bearer $T" "$B"')).toHaveLength(1);
+    expect(bearerInCurlArgv('curl -fsS -H "Authorization: Bearer ${T}" "$B"')).toHaveLength(1);
+    expect(bearerInCurlArgv("curl -fsS \\\n  -H 'Authorization: Bearer '\"$T\" \"$B\"")).toHaveLength(1);
+    expect(bearerInCurlArgv('claude mcp add x "$U" --header "Authorization: Bearer $(tok claude)"')).toHaveLength(0);
+    expect(bearerInCurlArgv("printf 'header = \"Authorization: Bearer %s\"\\n' \"$1\" | curl -K - \"$B\"")).toHaveLength(0);
+  });
+
+  it.each(SCRIPTS)("%s: no bearer in any curl argv", (_n, src) => {
+    expect(bearerInCurlArgv(src)).toEqual([]);
+  });
+
+  it("every script connect.sh actually installs into ~/.agency-board is clean too (heartbeat, linger, and any future codex hook file)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ab-scanall-"));
+    try {
+      const home = join(dir, "home");
+      const bin = join(dir, "bin");
+      mkdirSync(join(home, ".agency-board"), { recursive: true });
+      mkdirSync(join(home, ".codex"));
+      mkdirSync(bin);
+      writeFileSync(join(home, ".agency-board", "claude.token"), FAKE_TOKEN + "\n", { mode: 0o600 });
+      writeFileSync(join(home, ".agency-board", "codex.token"), "agency-board_codex_testtoken00000000000\n", { mode: 0o600 });
+      for (const n of ["curl", "claude", "codex"]) { writeFileSync(join(bin, n), "#!/bin/sh\nexit 7\n"); chmodSync(join(bin, n), 0o755); }
+      const script = join(dir, "connect.sh");
+      writeFileSync(script, CONNECT_SH.split("__AGENCY_BOARD_BASE_URL__").join(STUB_BASE));
+      const r = spawnSync("/bin/sh", ["-s", "--", "--hooks-only"], { input: readFileSync(script, "utf8"), env: { HOME: home, PATH: `${bin}:/usr/bin:/bin` } as unknown as NodeJS.ProcessEnv, encoding: "utf8" });
+      expect(r.status, r.stderr).toBe(0);
+      const installed = readdirSync(join(home, ".agency-board")).filter((f) => /\.(sh|mjs|js|ps1)$/.test(f) && !f.includes(".bak-"));
+      expect(installed).toEqual(expect.arrayContaining(["heartbeat.sh", "linger.sh"]));
+      for (const f of installed) expect(bearerInCurlArgv(readFileSync(join(home, ".agency-board", f), "utf8")), f).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

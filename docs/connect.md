@@ -75,7 +75,7 @@ an error and exit code 1; connect with a code first.
 ### Session-start inbox
 
 On `session-start` the heartbeat hook also fetches `GET /api/v1/inbox?format=text` (3 s timeout) with the
-claude token and prints it. Claude Code adds SessionStart hook output to the new session, so the agent
+claude token and prints it (Codex runs the same script as `heartbeat.sh session-start codex`, with the codex token). Claude Code adds SessionStart hook output to the new session, so the agent
 starts with its pending tasks, for example:
 
 ```text
@@ -112,7 +112,7 @@ not change are not touched and not backed up. The script prints the list of chan
 | `~/.hermes/.env` | `AGENCY_BOARD_TOKEN_HERMES=...` line (replaced in place) |
 | `~/.hermes/config.yaml` | `agency-board:` entry inserted right under the top-level `mcp_servers:` (key created at EOF if absent) |
 | `~/.claude/settings.json` | `SessionStart` + `Stop` hooks running `sh ~/.agency-board/heartbeat.sh ...` (edited as JSON with `osascript -l JavaScript`; skipped if a hook with `agency-board/heartbeat.sh` exists), plus `PostToolUse` (matcher `mcp__agency-board__complete_task`) and a second `Stop` hook (timeout 86400 s) running `sh ~/.agency-board/linger.sh mark\|stop claude`; each is skipped if a hook with `agency-board/linger.sh` exists in that event, except that an existing linger `Stop` hook with a timeout below 86400 is raised to 86400 (upgrade path, section 12) |
-| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | the same two linger hooks with agent `codex` plus an `Interrupt` hook (`sh ~/.agency-board/linger.sh interrupt codex`) and a `UserPromptSubmit` hook (`sh ~/.agency-board/linger.sh prompt codex`, arms `$listen` / `$wait` / `$unlisten` outside the Codex sandbox, section 12); existing hooks are kept. Codex asks you to trust new hooks once: "Trust all and continue" at its next start, or `/hooks` |
+| `~/.codex/hooks.json` (only with a codex token and an existing `~/.codex`) | a `SessionStart` hook (matcher `startup|resume`, `sh ~/.agency-board/heartbeat.sh session-start codex`: heartbeat plus the pending-task inbox printed into the Codex session, codex token on curl stdin only), the same two linger hooks with agent `codex` plus an `Interrupt` hook (`sh ~/.agency-board/linger.sh interrupt codex`) and a `UserPromptSubmit` hook (`sh ~/.agency-board/linger.sh prompt codex`, arms `$listen` / `$wait` / `$unlisten` outside the Codex sandbox, section 12); existing hooks are kept. Codex asks you to trust new hooks once: "Trust all and continue" at its next start, or `/hooks` |
 | `~/.claude/commands/{listen,wait,unlisten}.md` | slash commands `/listen`, `/wait`, `/unlisten` (section 12). Each file carries the marker line `<!-- agency-board:commands v1 -->` after the frontmatter; a file without the marker is not overwritten (warning) |
 | `~/.agents/skills/{listen,wait,unlisten}/SKILL.md` (only with a codex token and an existing `~/.codex`) | Codex skills (`$listen`, `$wait`, `$unlisten`); they run no command, see section 12. Custom prompts `~/.codex/prompts/{listen,wait,unlisten}.md` are no longer installed: one that carries the marker (older connect.sh) is moved to `<file>.bak-agency-board-<ts>`, one without it is yours and left alone |
 | `~/.agency-board/listen/` | dir mode 700; per-session state files `<agent>-<session_id>` and `<agent>-pending` created by `/listen` and `/wait`, removed by `/unlisten` or Esc |
@@ -152,7 +152,7 @@ claude mcp remove -s user agency-board
 # delete the lines between "# >>> agency-board >>>" and "# <<< agency-board <<<" (inclusive) in:
 #   ~/.codex/config.toml  ~/.zshrc  ~/.bash_profile  ~/.hermes/config.yaml
 # delete the AGENCY_BOARD_TOKEN_HERMES= line in ~/.hermes/.env
-# delete the heartbeat and linger hooks in ~/.claude/settings.json (and the linger hooks, incl. Interrupt and UserPromptSubmit, in ~/.codex/hooks.json;
+# delete the heartbeat and linger hooks in ~/.claude/settings.json (and the SessionStart and linger hooks, incl. Interrupt and UserPromptSubmit, in ~/.codex/hooks.json;
 # Codex keeps a trusted_hash per hook in ~/.codex/config.toml [hooks.state."..."]: remove those entries too if you like)
 rm -f ~/.claude/commands/{listen,wait,unlisten}.md
 # older installs also left ~/.codex/prompts/{listen,wait,unlisten}.md (now moved to *.bak-agency-board-<ts> by connect.sh): delete those too
@@ -234,7 +234,10 @@ Mitigations in place:
 - Access is logged; alerts fire on a new country, a new network, and concurrent use from two networks.
 - The connect code is single use, expires in 10 minutes, and exchange is rate-limited (5 failures / 10 min per IP).
 - The scripts never print a full token (only a short prefix: `agency-board_<agent>_` plus 4 characters).
+- The shell scripts (`heartbeat.sh`, `linger.sh`, the guide fetch in `connect.sh`) hand the token to `curl` as a config line on stdin (`curl -K -`, written by the `printf` builtin), never as `-H "Authorization: Bearer ..."`, so it is not in any process argv and `ps` shows nothing. A token with a quote, backslash or space is refused (no header is sent).
 - `rotate` / `revoke` / `revoke-agent` cut a leaked token off immediately.
+
+Known limit, argv: `connect.sh` / `connect.ps1` register the Claude MCP server with `claude mcp add ... --header "Authorization: Bearer <token>"`. The `claude` CLI only accepts the header as an argument (no env var or stdin form), so the token is visible in `ps` for the second or so that command runs. It is a one-time call at connect time (not per heartbeat or poll), it cannot be avoided without the CLI offering another input, and it is left unchanged.
 
 Not mitigated: malware running as your user. If a device may be compromised, `revoke` it first, then clean it.
 
@@ -465,7 +468,8 @@ Codex differences (verified 2026-10-14 on codex-cli 0.162.0-alpha.17.2: a real `
   unwritable from the sandbox: no `config.toml` change, no extra writable root.
 - **`UserPromptSubmit` hook** `sh ~/.agency-board/linger.sh prompt codex`: stdin JSON has `session_id` and the raw `prompt`
   (`$name` is not expanded; it also fires in `codex exec`). Only the first token of the prompt counts: exactly `$listen`,
-  `$wait` or `$unlisten` (case sensitive; leading spaces and newlines skipped). `$listen` / `$wait` arm with the hook's real
+  `$wait` or `$unlisten` (case sensitive; leading spaces and newlines skipped), bare or, as Codex Desktop sends it, as the skill link
+  `[$listen](<path>/skills/listen/SKILL.md)` (link text exactly the token, target ending in `/skills/<same name>/SKILL.md`, then whitespace or end). `$listen` / `$wait` arm with the hook's real
   `session_id` (state `listen/codex-<session_id>`, same `arm` code and status line as Claude, slider rules included).
   `$unlisten` turns off EVERY codex session on this machine, not only its own: while the Stop hook loops, Codex queues
   a typed prompt until the turn ends, so the realistic ways to stop are Esc (Interrupt hook, own session) or `$unlisten`
@@ -483,7 +487,7 @@ Codex differences (verified 2026-10-14 on codex-cli 0.162.0-alpha.17.2: a real `
   moved to `<file>.bak-agency-board-<ts>`; an unmarked one is yours and untouched.
 - **Trust**: new or changed hooks need review. Codex shows "Hooks need review" at start: choose "Trust all and continue", or
   review in `/hooks`. The decision is stored in `~/.codex/config.toml` as `[hooks.state."<hooks.json>:<event>:<i>:<j>"]
-  trusted_hash`. Untrusted, `$listen` does nothing and the skill says so. Never use `--dangerously-bypass-hook-trust`.
+  trusted_hash`. Untrusted, `$listen` does nothing; the skill then says "listen mode did NOT start" (it may say ON only when the hook's `agency-board: listen mode ON ...` line is in its context). Never use `--dangerously-bypass-hook-trust`.
 - **Session id**: the hook input carries it, so the old "pending file binds at the next Stop" race is gone for Codex. Fallback only:
   if the id is missing or not a safe file name, `$listen` / `$wait` write `~/.agency-board/listen/codex-pending`; the next
   `Stop` of that agent with a pending file younger than 300 s binds it to its own `session_id` (two Codex sessions arming

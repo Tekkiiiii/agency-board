@@ -463,7 +463,7 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
      `  agency-board:\n    url: "<BASE>/api/mcp"\n    headers:\n      Authorization: "Bearer ${AGENCY_BOARD_TOKEN_HERMES}"` (2-space indent,
      markers as YAML comments at the same indent). Must not break existing entries (awk insertion right after the `mcp_servers:` line).
   7. Heartbeat hook ON by default (`--no-heartbeat` or `AGENCY_BOARD_NO_HEARTBEAT=1` skips): write `~/.agency-board/heartbeat.sh`
-     (`curl -fsS -m 3 -X POST -H "Authorization: Bearer $(cat ~/.agency-board/claude.token)" -H 'content-type: application/json' -d '{"status_note":"'"$1"'"}' "$BASE/api/v1/heartbeat" >/dev/null 2>&1 || true`)
+     (`printf 'header = "Authorization: Bearer %s"\n' "$T" | curl -fsS -m 3 -K - -X POST -H 'content-type: application/json' -d '{"status_note":"'"$1"'"}' "$BASE/api/v1/heartbeat" >/dev/null 2>&1 || true` with `T=$(cat ~/.agency-board/claude.token)`; the token goes to curl on stdin as a config line, never in argv (`ps`); the real script wraps the printf in an `ab_auth` helper that refuses a token outside the token alphabet)
      and add Claude Code hooks `SessionStart` and `Stop` running `sh ~/.agency-board/heartbeat.sh session-start|stop`
      to `~/.claude/settings.json` using `osascript -l JavaScript` (JXA) to edit JSON safely (backup first; idempotent:
      skip if a hook command containing `agency-board/heartbeat.sh` exists).
@@ -471,7 +471,7 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
      spliced into connect.sh at `__AGENCY_BOARD_LINGER_SH__`) and add a `PostToolUse` hook (matcher `mcp__agency-board__complete_task`,
      `sh ~/.agency-board/linger.sh mark claude`) and a `Stop` hook (`... linger.sh stop claude`, timeout 86400) by the same JXA merge
      (idempotent on `agency-board/linger.sh`); with a codex token and an existing `~/.codex`, the same two hooks go into
-     `~/.codex/hooks.json` with agent `codex` (plus an `Interrupt` hook and a `UserPromptSubmit` hook, §21). An existing linger `Stop` hook with a timeout below 86400 is raised to 86400.
+     `~/.codex/hooks.json` with agent `codex` (plus an `Interrupt` hook and a `UserPromptSubmit` hook, §21) and a `SessionStart` hook (matcher `startup|resume`) running `sh ~/.agency-board/heartbeat.sh session-start codex` (`heartbeat.sh <note> [claude|codex]`: the 2nd word selects `~/.agency-board/<agent>.token`, anything else is a silent no-op). An existing linger `Stop` hook with a timeout below 86400 is raised to 86400.
      Slash commands and Codex skills: §21. Windows (`connect.ps1`) has no linger hooks and no slash commands.
   8. Print summary: agent, token prefix, files changed, backups; then "Restart your Claude/Codex/Hermes sessions."
   Re-running is safe (idempotent blocks). Never echo full tokens.
@@ -1077,7 +1077,7 @@ Page load: `loadListenMinutes` (never throws; missing row shows the default 30).
 - `interrupt <claude|codex>` (Codex `Interrupt` hook, `session_id` from stdin): disarm for that session, silent. Documented event, untested.
 - `prompt codex` (Codex `UserPromptSubmit` hook; runs OUTSIDE the Codex sandbox, which cannot write `~/.agency-board`): stdin JSON `{session_id, prompt, ...}`.
   First token of the raw `prompt` (leading spaces and `\n \t \r` skipped; ends at whitespace, backslash or quote), case sensitive, exactly `$listen`, `$wait` or
-  `$unlisten`; anything else (token later in the text, `/listen`, empty, no `prompt`, other agent) -> exit 0 at once with NO stdout, no file, no network, no log.
+  `$unlisten`, bare or as the Codex Desktop skill link `[$name](<path>/skills/<name>/SKILL.md)` (link text exactly the token, target without quote/backslash/`)` ending in `/skills/<same name>/SKILL.md`, then whitespace, backslash, quote or end; JSON `\/` unescaped first); anything else (token later in the text, `/listen`, empty, no `prompt`, other agent) -> exit 0 at once with NO stdout, no file, no network, no log.
   Match: `$listen|$wait` -> same code as `arm codex <mode> <session_id>` (shared shell function `arm_do`; the hook's real `session_id`, state `listen/codex-<sid>`;
   unusable id -> `codex-pending` fallback); `$unlisten` -> same code as `disarm codex` WITHOUT an id (every codex session on this machine: the armed session may be
   another one, and Codex queues a typed prompt while the Stop hook loops). Output: exactly one JSON line

@@ -139,7 +139,9 @@ step_hermes() {
   # .env: replace the AGENCY_BOARD_TOKEN_HERMES line in place, or append it.
   tmp=$(newtmp)
   if [ -f "$HENV" ]; then src="$HENV"; else src=/dev/null; fi
-  awk -v v="AGENCY_BOARD_TOKEN_HERMES=$(tok hermes)" '
+  # the token goes to awk through its ENVIRON, not "-v v=...": argv is visible to every local user in ps, the environment is not
+  AGENCY_BOARD_V="AGENCY_BOARD_TOKEN_HERMES=$(tok hermes)" awk '
+    BEGIN { v = ENVIRON["AGENCY_BOARD_V"] }
     /^AGENCY_BOARD_TOKEN_HERMES=/ { if (!d) print v; d = 1; next }
     { print }
     END { if (!d) print v }' "$src" > "$tmp"
@@ -205,9 +207,18 @@ gen_cmd() {
   else
     STOPW='$unlisten'
     HOOKL="agency-board's UserPromptSubmit hook has already handled this command for this session before this turn (it runs outside the Codex sandbox; a shell command from you cannot write ~/.agency-board). Its one-line result is in your context and starts with \"agency-board:\"."
-    NOHOOK="If there is no such line, the hook is not active: tell your user to run /hooks and choose \"Trust all and continue\" for the agency-board hooks (or rerun connect.sh --hooks-only), then stop. NEVER run a shell command to start or stop this mode."
-    LEAD="$HOOKL $NOHOOK If that line says the mode is OFF or was not started, tell your user that and stop here."
-    ULEAD="$HOOKL $NOHOOK Confirm to your user in one line, from that line, that listen and wait mode are off for every Codex session on this machine."
+    # The model may confirm only what the hook really printed. These prefixes are the hook's exact lines (arm_do / disarm_do in
+    # linger.sh); tests/scripts.test.ts and tests/linger.test.ts pin them to the hook output.
+    HOOKFIX="tell your user to run /hooks and choose \"Trust all and continue\" for the agency-board hooks (or rerun connect.sh --hooks-only), then stop. NEVER run a shell command to start or stop this mode."
+    if [ "$2" = unlisten ]; then
+      OFFL="agency-board: listen/wait mode is OFF for every codex session on this machine"
+      NOHOOK="Say the mode is off ONLY if that line starts exactly with \"$OFFL\". Any other agency-board line: repeat it to your user and stop. If there is no line that starts exactly like that, the hook did not run: say the mode was NOT turned off, and $HOOKFIX"
+    else
+      ONL="agency-board: $2 mode ON for this codex session"
+      NOHOOK="Say $2 mode is on ONLY if that line starts exactly with \"$ONL\". If the line says the mode is OFF or was not started, tell your user that and stop here. If there is no line that starts exactly like that, the hook did not run: say \"$2 mode did NOT start\", and $HOOKFIX"
+    fi
+    LEAD="$HOOKL $NOHOOK"
+    ULEAD="$HOOKL $NOHOOK Then confirm to your user in one line, from that line, that listen and wait mode are off for every Codex session on this machine."
   fi
   case "$2" in
     listen)
@@ -258,11 +269,22 @@ step_heartbeat() {
 # agency-board heartbeat (installed by connect.sh). Never blocks or fails a session.
 # On session-start it also prints this identity's pending tasks; Claude Code adds
 # SessionStart hook stdout to the session context. Any failure is silent.
-T=$(cat "$HOME/.agency-board/claude.token" 2>/dev/null) || exit 0
-curl -fsS -m 3 -X POST -H "Authorization: Bearer $T" -H 'content-type: application/json' -d '{"status_note":"'"$1"'"}' "@AGENCY_BOARD_API_BASE@/api/v1/heartbeat" >/dev/null 2>&1 || true
+# Usage: heartbeat.sh <note> [claude|codex]. The optional 2nd word picks the identity (its token file); default claude.
+# Codex runs it as: sh ~/.agency-board/heartbeat.sh session-start codex  (its SessionStart hook, see connect.sh).
+AG=claude
+[ -z "$2" ] || AG=$2
+case "$AG" in claude|codex) ;; *) exit 0 ;; esac
+T=$(cat "$HOME/.agency-board/$AG.token" 2>/dev/null) || exit 0
+# The token goes to curl on STDIN as a config line (printf is a builtin), never in argv where ps would show it. A token with a
+# char outside the token alphabet is refused (no header sent) so it cannot break out of the config line.
+ab_auth() {
+  case "$1" in ''|*[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+  printf 'header = "Authorization: Bearer %s"\n' "$1" 2>/dev/null
+}
+ab_auth "$T" | curl -fsS -m 3 -K - -X POST -H 'content-type: application/json' -d '{"status_note":"'"$1"'"}' "@AGENCY_BOARD_API_BASE@/api/v1/heartbeat" >/dev/null 2>&1 || true
 if [ "$1" = session-start ]; then
   if [ -s "$HOME/.agency-board/guide.txt" ]; then echo "agency-board: how to use the shared memory + task board: read ~/.agency-board/guide.txt"; fi
-  curl -fsS -m 3 -H "Authorization: Bearer $T" "@AGENCY_BOARD_API_BASE@/api/v1/inbox?format=text" 2>/dev/null || true
+  ab_auth "$T" | curl -fsS -m 3 -K - "@AGENCY_BOARD_API_BASE@/api/v1/inbox?format=text" 2>/dev/null || true
 fi
 exit 0
 HBEOF
@@ -293,7 +315,7 @@ LGEOF
 
 # apply_hooks <settings-file> <claude|codex>: idempotent JSON merge with osascript -l JavaScript.
 # claude: SessionStart + Stop heartbeat hooks, PostToolUse(complete_task) mark + Stop linger hooks.
-# codex: only the linger hooks (Codex has no heartbeat hook). A hook is "present" when any command in
+# codex: the linger hooks + SessionStart (heartbeat.sh session-start codex). A hook is "present" when any command in
 # that event already contains agency-board/heartbeat.sh or agency-board/linger.sh, so reruns add nothing
 # and a heartbeat-only settings.json is upgraded with just the linger hooks. Backup first.
 apply_hooks() {
@@ -313,7 +335,7 @@ function run(argv) {
   if (obj.hooks === undefined) obj.hooks = {};
   if (obj.hooks === null || typeof obj.hooks !== 'object' || Array.isArray(obj.hooks)) throw new Error('hooks is not an object');
   var added = 0;
-  function ensure(ev, matcher, needle, command, timeout) {
+  function ensure(ev, matcher, needle, command, timeout, extra) {
     if (obj.hooks[ev] === undefined) obj.hooks[ev] = [];
     var list = obj.hooks[ev];
     if (!Array.isArray(list)) throw new Error('hooks.' + ev + ' is not an array');
@@ -329,6 +351,7 @@ function run(argv) {
     }
     var h = { type: 'command', command: command };
     if (timeout) h.timeout = timeout;
+    if (extra) for (var k in extra) h[k] = extra[k];
     list.push({ matcher: matcher, hooks: [h] });
     added++;
   }
@@ -337,6 +360,11 @@ function run(argv) {
   if (agent === 'claude') {
     ensure('SessionStart', '', HB, 'sh ~/.agency-board/heartbeat.sh session-start', 0);
     ensure('Stop', '', HB, 'sh ~/.agency-board/heartbeat.sh stop', 0);
+  }
+  if (agent === 'codex') {
+    // Codex SessionStart: pending tasks into the session context (the same heartbeat.sh, codex identity)
+    ensure('SessionStart', 'startup|resume', HB + ' session-start', 'sh ~/.agency-board/heartbeat.sh session-start codex', 0,
+      { statusMessage: 'Loading agency-board tasks', additionalContextLimit: 5000 });
   }
   // linger: mark a finished task, then (Stop) keep checking the board for up to 1800 s; an armed /listen or /wait session
   // listens with no end (until /unlisten or Esc), so the Stop hook timeout is 86400 s (24 h)
@@ -408,6 +436,14 @@ step_codex_linger() {
   fi
 }
 
+# ab_auth <token>: prints the curl config line carrying the bearer token; use as: ab_auth "$T" | curl -K - ... URL
+# The token travels on curl's stdin (printf is a builtin), so it is never in any process argv (ps shows argv to every local
+# user). A token with a char outside the token alphabet (quote, backslash, space, newline) is refused: no header is sent.
+ab_auth() {
+  case "$1" in ''|*[!A-Za-z0-9._~+/=-]*) return 1 ;; esac
+  printf 'header = "Authorization: Bearer %s"\n' "$1" 2>/dev/null
+}
+
 # step_guide: best-effort copy of the agent guide (GET /api/v1/guide?format=text) to
 # ~/.agency-board/guide.txt. Never fatal: no route yet (404) or no network keeps any old copy.
 step_guide() {
@@ -417,7 +453,7 @@ step_guide() {
   done
   [ -n "$GT" ] || return 0
   tmp=$(newtmp)
-  if curl -fsS -m 10 -H "Authorization: Bearer $GT" -o "$tmp" "$API_BASE/api/v1/guide?format=text" </dev/null >/dev/null 2>&1 && [ -s "$tmp" ]; then
+  if ab_auth "$GT" | curl -fsS -m 10 -K - -o "$tmp" "$API_BASE/api/v1/guide?format=text" >/dev/null 2>&1 && [ -s "$tmp" ]; then
     if [ -f "$AGENCY_BOARD_DIR/guide.txt" ] && cmp -s "$tmp" "$AGENCY_BOARD_DIR/guide.txt"; then rm -f "$tmp"; return 0; fi
     mv -f "$tmp" "$AGENCY_BOARD_DIR/guide.txt" || { rm -f "$tmp"; return 0; }
     CHANGED="$CHANGED
