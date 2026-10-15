@@ -7,7 +7,7 @@ reading, and list the deviation under "Contract deviations" in your report.
 ## 0. Global rules (all tracks)
 
 - Stack: Next.js 15.5 App Router, TypeScript 5 strict, zod 4, `mcp-handler` 2.2 +
-  `@modelcontextprotocol/server` 2.x, `@supabase/supabase-js` 2, vitest 5. Node 20+ on Vercel (Fluid).
+  `@modelcontextprotocol/server` 2.x, `@supabase/supabase-js` 2, vitest 5. Node 22+ on Vercel (Fluid).
 - Build-config files (`package.json`, `package-lock.json`, `tsconfig.json`, `next.config.ts`, `vitest.config.ts`) change only
   with a reason stated in the PR. Need a dependency? Say why in the PR description.
 - Imports: **relative paths only** (no `@/` alias), no file extensions in TS imports.

@@ -4,7 +4,7 @@ Thanks for helping. This project is small and early (v0.1), so keep changes focu
 
 ## Setup
 
-Requirements: Node 20+, Docker (or a compatible runtime), the Supabase CLI.
+Requirements: Node.js 22+, Docker (or a compatible runtime), the Supabase CLI.
 
 ```sh
 supabase start                 # local Postgres, auth and edge runtime; applies supabase/migrations

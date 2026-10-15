@@ -62,7 +62,7 @@ Embedding is optional at write time: if the embed function is unreachable, the m
 
 ## Local quickstart
 
-You need Node 20+, Docker (or a compatible runtime) and the [Supabase CLI](https://supabase.com/docs/guides/local-development).
+You need Node.js 22+, Docker (or a compatible runtime) and the [Supabase CLI](https://supabase.com/docs/guides/local-development).
 
 ```sh
 supabase start                      # applies supabase/migrations, prints local URL and keys

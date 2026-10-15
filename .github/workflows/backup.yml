@@ -16,8 +16,23 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
     steps:
+      # Forks and fresh clones have no secrets. Skip cleanly (green run) instead of failing nightly.
+      - name: Check secrets
+        id: gate
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::notice::backup skipped: secrets not set (SUPABASE_DB_URL and BACKUP_PASSPHRASE)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install postgresql-client-17 (PGDG)
+        if: steps.gate.outputs.run == 'true'
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
@@ -28,9 +43,7 @@ jobs:
           /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Dump + encrypt
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           test -n "$SUPABASE_DB_URL" || { echo "::error::SUPABASE_DB_URL secret missing"; exit 1; }
@@ -48,6 +61,7 @@ jobs:
           echo "tables=$TABLES size=$(stat -c %s backup.dump.gpg) bytes"
 
       - name: Upload artifact
+        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: db-backup-${{ env.STAMP }}
