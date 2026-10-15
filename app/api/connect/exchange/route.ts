@@ -1,5 +1,5 @@
 import { after } from "next/server";
-import { logAndEvaluate } from "../../../../lib/access";
+import { EXCHANGE_ROUTE, logAndEvaluate, type IssuedRef } from "../../../../lib/access";
 import { db } from "../../../../lib/db";
 import { exchangeCode } from "../../../../lib/devices";
 import { errorResponse, getMeta, json } from "../../../../lib/request";
@@ -7,7 +7,7 @@ import { ApiError } from "../../../../lib/types";
 
 export const dynamic = "force-dynamic";
 
-const ROUTE = "connect:exchange";
+const ROUTE = EXCHANGE_ROUTE;
 const FAIL_WINDOW_S = 600;
 const FAIL_MAX = 5;
 
@@ -34,6 +34,7 @@ export async function POST(req: Request): Promise<Response> {
   const key = `connect-fail:${meta.ip ?? "unknown"}`;
   const base = (process.env.AGENCY_BOARD_BASE_URL || new URL(req.url).origin).replace(/\/+$/, "");
   let res: Response;
+  let issued: IssuedRef[] = []; // success only: one access_log row per token created (ids, never values)
   try {
     if ((await failuresInWindow(key)) >= FAIL_MAX) {
       const retry = FAIL_WINDOW_S - Math.floor((Date.now() / 1000) % FAIL_WINDOW_S);
@@ -55,6 +56,7 @@ export async function POST(req: Request): Promise<Response> {
         },
         meta,
       );
+      issued = r.issued.map((i) => ({ tokenId: i.tokenId, deviceId: r.deviceId, agent: i.agent }));
       const flat: Record<string, string> = {};
       for (const [agent, raw] of Object.entries(r.tokens)) if (raw) flat[`token_${agent}`] = raw;
       res = json({
@@ -76,10 +78,15 @@ export async function POST(req: Request): Promise<Response> {
   }
   res.headers.set("cache-control", "no-store");
   const status = res.status;
+  const logAll = async () => {
+    if (status !== 200 || issued.length === 0) return logAndEvaluate(meta, null, ROUTE, status);
+    for (const i of issued) await logAndEvaluate(meta, null, ROUTE, status, i);
+  };
+  const onErr = (e: unknown) => console.error("[hub] ACCESS_LOG_FAILED", String((e as { code?: string })?.code ?? (e as Error)?.name ?? "unknown"));
   try {
-    after(() => logAndEvaluate(meta, null, ROUTE, status).catch((e) => console.error("[hub] ACCESS_LOG_FAILED", String((e as { code?: string })?.code ?? (e as Error)?.name ?? "unknown"))));
+    after(() => logAll().catch(onErr));
   } catch {
-    void logAndEvaluate(meta, null, ROUTE, status).catch((e) => console.error("[hub] ACCESS_LOG_FAILED", String((e as { code?: string })?.code ?? (e as Error)?.name ?? "unknown")));
+    void logAll().catch(onErr);
   }
   return res;
 }

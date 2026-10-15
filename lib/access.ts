@@ -80,15 +80,27 @@ function logErr(where: string, e: unknown): void {
   console.error(`[hub] access ${where} failed`, String(code));
 }
 
-export async function logAndEvaluate(meta: RequestMeta, ctx: AgentCtx | null, route: string, status: number): Promise<void> {
+/** Identity recorded on a row without being a token use (connect exchange: ids only, never the token value). */
+export interface IssuedRef { tokenId: string; deviceId: string; agent: string }
+
+/** access_log.route of the connect exchange; its rows are the connect event, not token use (excluded from concurrent_use). */
+export const EXCHANGE_ROUTE = "connect:exchange";
+
+export async function logAndEvaluate(
+  meta: RequestMeta,
+  ctx: AgentCtx | null,
+  route: string,
+  status: number,
+  issued?: IssuedRef,
+): Promise<void> {
   try {
     const { data: row, error } = await db()
       .from("access_log")
       .insert({
         at: meta.at.toISOString(),
-        token_id: ctx?.tokenId ?? null,
-        device_id: ctx?.deviceId ?? null,
-        agent: ctx?.agent ?? null,
+        token_id: ctx?.tokenId ?? issued?.tokenId ?? null,
+        device_id: ctx?.deviceId ?? issued?.deviceId ?? null,
+        agent: ctx?.agent ?? issued?.agent ?? null,
         ip: meta.ip,
         asn: meta.asn,
         country: meta.country,
@@ -117,6 +129,7 @@ export async function logAndEvaluate(meta: RequestMeta, ctx: AgentCtx | null, ro
           .from("access_log")
           .select("at, ip, asn, country")
           .eq("token_id", ctx.tokenId)
+          .neq("route", EXCHANGE_ROUTE)
           .gte("at", since)
           .neq("id", row.id)
           .order("at", { ascending: true })

@@ -350,7 +350,10 @@ export function evaluateAlerts(cur: { at: Date; network: string | null; country:
    //   A single switch (A,A,B,B) is NOT red.
 export function evaluateAuthBurst(globalFailures5m: number, ipFailures5m: number, ip: string | null): AlertDraft | null;
    // red if ipFailures5m >= 5 (value = ip) else if globalFailures5m >= 10 (value = 'global')
-export async function logAndEvaluate(meta: RequestMeta, ctx: AgentCtx | null, route: string, status: number): Promise<void>;
+export async function logAndEvaluate(meta: RequestMeta, ctx: AgentCtx | null, route: string, status: number,
+  issued?: { tokenId: string; deviceId: string; agent: string }): Promise<void>;
+  // issued (connect exchange only): fills access_log token_id/device_id/agent with ids, never a token value or the code.
+  // It is not a token use: no last_used_at bump, no alert evaluation. concurrent_use ignores route 'connect:exchange' rows.
 export async function trustAlert(alertId: string): Promise<void>;     // adds country/network to device_known, status trusted
 export async function dismissAlert(alertId: string): Promise<void>;
 export async function listAlerts(status?: string): Promise<unknown[]>;
@@ -363,7 +366,7 @@ export async function embed(texts: string[]): Promise<number[][] | null>;   // n
 export async function issueConnectCode(p: { machineName: string; os?: "mac" | "windows" | "linux"; agents: AgentId[] }, baseUrl: string)
   : Promise<{ code: string; expiresAt: string; commands: { mac: string; windows: string } }>;
 export async function exchangeCode(p: { code: string; hostname?: string; os?: string }, meta: RequestMeta)
-  : Promise<{ serverUrl?: string; machine: string; deviceId: string; tokens: Partial<Record<AgentId, string>> }>;
+  : Promise<{ serverUrl?: string; machine: string; deviceId: string; tokens: Partial<Record<AgentId, string>>; issued: Array<{ tokenId: string; agent: AgentId }> }>;
 export async function rotateDevice(deviceId: string, baseUrl: string): Promise<{ code: string; expiresAt: string; commands: { mac: string; windows: string } }>;
 export async function revokeDevice(deviceId: string): Promise<void>;
 export async function revokeAgent(agent: AgentId): Promise<number>;   // revokes all tokens of agent; returns count
@@ -436,6 +439,8 @@ stays within `CHAR_CAP` = 8000 characters (`tests/guide.test.ts`); shorten text,
   in code: revoke that device's existing tokens for that agent, mint new token with `scopesFor(agent)`;
   seed `device_known` with meta.country + meta.network (trusted_by='connect'). Response
   `{data:{machine, device_id, server_url: base + '/api/mcp', rest_url: base + '/api/v1', tokens:{agent: raw}}}`.
+  Logging: success writes one `access_log` row per token created (`route='connect:exchange'`, result 200, `token_id`/`device_id`/`agent`
+  = the new token's ids, never the token value or the code); failure rows keep token_id/device_id/agent null.
 - Script source of truth: `lib/scripts/connectSh.ts` and `lib/scripts/connectPs1.ts`, each exporting a
   template string (`export const CONNECT_SH = String.raw`...``; same for `CONNECT_PS1`). This avoids file-tracing
   config (no `next.config.ts` edits). `app/connect.sh/route.ts` / `app/connect.ps1/route.ts` return the string with

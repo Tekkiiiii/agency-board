@@ -76,7 +76,14 @@ export async function issueConnectCode(
 export async function exchangeCode(
   p: { code: string; hostname?: string; os?: string },
   meta: RequestMeta,
-): Promise<{ serverUrl?: string; machine: string; deviceId: string; tokens: Partial<Record<AgentId, string>> }> {
+): Promise<{
+  serverUrl?: string;
+  machine: string;
+  deviceId: string;
+  tokens: Partial<Record<AgentId, string>>;
+  /** Ids of the tokens just created (never the values): for the exchange access_log rows. */
+  issued: Array<{ tokenId: string; agent: AgentId }>;
+}> {
   const code = normalizeCode(typeof p.code === "string" ? p.code : "");
   if (code.length !== CODE_LEN) fail(400, "CODE_INVALID", "connect code is invalid");
   const codeHash = sha256hex(code);
@@ -124,6 +131,7 @@ export async function exchangeCode(
   );
 
   const tokens: Partial<Record<AgentId, string>> = {};
+  const issued: Array<{ tokenId: string; agent: AgentId }> = [];
   for (const agent of c.agents.filter((a): a is AgentId => AGENTS.includes(a as AgentId))) {
     check(
       await db()
@@ -135,15 +143,15 @@ export async function exchangeCode(
       "revoke old tokens",
     );
     const t = newAgentToken(agent);
-    check(
-      await db().from("agent_tokens").insert({
-        agent,
-        device_id: device.id,
-        token_hash: t.hash,
-        token_prefix: t.prefix,
-      }),
+    const tok = check(
+      await db()
+        .from("agent_tokens")
+        .insert({ agent, device_id: device.id, token_hash: t.hash, token_prefix: t.prefix })
+        .select("id")
+        .single(),
       "insert token",
-    );
+    ) as { id: string };
+    issued.push({ tokenId: tok.id, agent });
     // CONTRACT §11: default role if absent; never overwrite a role the owner already set.
     check(
       await db()
@@ -165,7 +173,7 @@ export async function exchangeCode(
     );
   }
 
-  return { machine: c.machine_name, deviceId: device.id, tokens };
+  return { machine: c.machine_name, deviceId: device.id, tokens, issued };
 }
 
 async function revokeDeviceTokens(deviceId: string): Promise<void> {
