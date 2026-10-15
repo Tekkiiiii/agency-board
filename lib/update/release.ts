@@ -151,7 +151,7 @@ export async function fetchLatestRelease(opts: LookupOptions = {}): Promise<Late
   );
 }
 
-const SHA_RE = /^[0-9a-f]{40}$/;
+export const SHA_RE = /^[0-9a-f]{40}$/;
 const MAX_DEREF = 3; // lightweight tag = 0 hops; an annotated tag pointing at another tag is followed this many times
 
 export type TagCommitResult =

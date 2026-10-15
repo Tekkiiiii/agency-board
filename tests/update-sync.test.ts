@@ -40,6 +40,7 @@ const input = (fn: typeof fetch, over: Record<string, unknown> = {}) => ({
   token: TOKEN,
   upstream: UP,
   tag: TAG,
+  expectedSha: COMMIT_SHA,
   fetch: fn,
   ...over,
 });
@@ -68,7 +69,7 @@ describe("syncFork: request shape", () => {
   it("resolves the tag, then POSTs exactly /repos/{fork}/merges with {base, head: <tag commit sha>, commit_message}", async () => {
     const f = gh(() => res(201, { sha: "m1", message: "Merge" }));
     const r = await syncFork(input(f.fn));
-    expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE });
+    expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE, sha: COMMIT_SHA });
     expect(f.calls).toHaveLength(2);
     expect(f.calls[0].url).toBe(REF_URL);
     const [post] = merges(f.calls);
@@ -119,11 +120,9 @@ describe("syncFork: request shape", () => {
     expect(JSON.parse(String(post.init.body)).base).toBe("release/1.x");
   });
 
-  it("resolves the tag FRESH at sync time: a tag moved since the status check merges the new sha", async () => {
-    const f = gh(() => res(201), MOVED_SHA);
+  it("resolves the tag FRESH at sync time (no caching): every call looks the tag up again", async () => {
+    const f = gh(() => res(201));
     await syncFork(input(f.fn));
-    expect(JSON.parse(String(merges(f.calls)[0].init.body)).head).toBe(MOVED_SHA);
-    // and a second call resolves again (no caching)
     await syncFork(input(f.fn));
     expect(f.calls.filter((c) => c.url === REF_URL)).toHaveLength(2);
   });
@@ -182,16 +181,72 @@ describe("syncFork: request shape", () => {
   });
 });
 
+describe("syncFork: expectedSha (F2: the commit the admin was shown)", () => {
+  it("fresh tag commit equals expectedSha -> merges exactly that commit", async () => {
+    const f = gh(() => res(201));
+    const r = await syncFork(input(f.fn, { expectedSha: COMMIT_SHA }));
+    expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE, sha: COMMIT_SHA });
+    expect(JSON.parse(String(merges(f.calls)[0].init.body)).head).toBe(COMMIT_SHA);
+  });
+
+  it("tag moved since the page was opened (fresh sha differs) -> tag_moved, fixed message, NO merge call", async () => {
+    const f = gh(() => res(201), MOVED_SHA);
+    const r = await syncFork(input(f.fn, { expectedSha: COMMIT_SHA }));
+    expect(r).toEqual({
+      ok: false,
+      code: "tag_moved",
+      message: "The release changed since you opened this page; reload and review it again",
+    });
+    expect(merges(f.calls)).toHaveLength(0);
+    expect(f.calls).toHaveLength(1); // only the tag lookup
+  });
+
+  it("the merge head is the freshly resolved sha, never taken from the caller", async () => {
+    const f = gh(() => res(201), MOVED_SHA);
+    const r = await syncFork(input(f.fn, { expectedSha: MOVED_SHA }));
+    expect(JSON.parse(String(merges(f.calls)[0].init.body)).head).toBe(MOVED_SHA);
+    expect(r).toMatchObject({ ok: true, sha: MOVED_SHA }); // the ok result carries the sha that was actually merged
+  });
+
+  it("an annotated tag is compared on its dereferenced commit, not on the tag object sha", async () => {
+    const f = fakeFetch((c) => {
+      if (c.init.method === "POST") return res(201);
+      if (c.url === REF_URL) return res(200, { ref: `refs/tags/${TAG}`, object: { sha: TAG_OBJ_SHA, type: "tag" } });
+      return res(200, { object: { sha: COMMIT_SHA, type: "commit" } });
+    });
+    expect((await syncFork(input(f.fn, { expectedSha: TAG_OBJ_SHA }))).ok).toBe(false);
+    expect(merges(f.calls)).toHaveLength(0);
+    expect((await syncFork(input(f.fn, { expectedSha: COMMIT_SHA }))).ok).toBe(true);
+  });
+
+  it("a missing or malformed expectedSha is refused before any request", async () => {
+    for (const bad of [undefined, null, "", "abc", COMMIT_SHA.toUpperCase(), `${COMMIT_SHA}0`, COMMIT_SHA.slice(1), `${COMMIT_SHA}\n`, 42]) {
+      const f = gh(() => res(201));
+      const r = await syncFork(input(f.fn, { expectedSha: bad }));
+      expect(r.ok).toBe(false);
+      expect(f.calls).toHaveLength(0);
+    }
+  });
+
+  it("a moved tag logs the code only (no sha, no token)", async () => {
+    await syncFork(input(gh(() => res(201), MOVED_SHA).fn));
+    expect(consoleText()).toContain("tag_moved");
+    expect(consoleText()).not.toContain(MOVED_SHA);
+    expect(consoleText()).not.toContain(COMMIT_SHA);
+    expect(consoleText()).not.toContain(TOKEN);
+  });
+});
+
 describe("syncFork: outcomes", () => {
   it("fork ahead of upstream: 201 merge commit created => ok with the sync message", async () => {
     const r = await syncFork(input(gh(() => res(201, { sha: "abc" })).fn));
-    expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE });
+    expect(r).toEqual({ ok: true, message: SYNC_OK_MESSAGE, sha: COMMIT_SHA });
     expect(r).not.toHaveProperty("upToDate");
   });
 
   it("already contains the tag: 204 => ok + upToDate with a different fixed message", async () => {
     const r = await syncFork(input(gh(() => res(204)).fn));
-    expect(r).toEqual({ ok: true, upToDate: true, message: syncUpToDateMessage(TAG) });
+    expect(r).toEqual({ ok: true, upToDate: true, message: syncUpToDateMessage(TAG), sha: COMMIT_SHA });
     expect(r.message).not.toBe(SYNC_OK_MESSAGE);
     expect(r.message).toContain(`already contains ${TAG}`);
     expect(r.message).toMatch(/Nothing to merge/);

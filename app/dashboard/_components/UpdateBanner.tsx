@@ -49,21 +49,26 @@ export function UpdateBanner({ status }: { status: UpdateStatus }) {
           <p className="hub-update__meta">{migrations}.</p>
         </div>
         <div className="hub-update__actions">
-          <ConfirmDialog
-            triggerLabel="Update"
-            triggerVariant="primary"
-            triggerSize="md"
-            title={`Update to v${status.latest}?`}
-            description={
-              <>
-                <p>{`This updates agency-board from v${status.current} to v${status.latest}. ${migrations}.`}</p>
-                <p>This syncs your fork on GitHub; Vercel then redeploys. It can take a minute or two.</p>
-              </>
-            }
-            confirmLabel="Update now"
-            pendingLabel="Syncing..."
-            action={syncUpdateAction}
-          />
+          {status.sha ? (
+            <ConfirmDialog
+              triggerLabel="Update"
+              triggerVariant="primary"
+              triggerSize="md"
+              title={`Update to v${status.latest}?`}
+              description={
+                <>
+                  <p>{`This updates agency-board from v${status.current} to v${status.latest}. ${migrations}.`}</p>
+                  <p>This syncs your fork on GitHub; Vercel then redeploys. It can take a minute or two.</p>
+                </>
+              }
+              confirmLabel="Update now"
+              pendingLabel="Syncing..."
+              action={syncUpdateAction}
+              fields={{ expectedSha: status.sha }}
+            />
+          ) : (
+            <p className="hub-update__meta">The release commit could not be verified right now. Reload in a moment, or sync manually.</p>
+          )}
         </div>
       </div>
       {notes && (

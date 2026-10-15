@@ -896,7 +896,7 @@ Plain CSS only (no Tailwind).
   `StatusDot`, `EmptyState`, `Button` (primary amber / secondary / danger), client: `AutoRefresh` (router.refresh every
   15 s, pauses when tab hidden), `ConfirmDialog` (native `<dialog>`; optional typed-confirmation string), `SubmitButton`
   (pending state), `CopyButton`.
-- Update banner (`app/dashboard/_components/UpdateBanner.tsx`, rendered by the layout for the admin session): shown only when `lib/update/status.ts` finds a newer upstream release; the Update button calls `syncUpdateAction` (`app/dashboard/update/actions.ts`: `requireAdmin()` first, same-origin check, rate limit 3/min, status re-derived server-side, fork/branch/token from server env only). Setup and policy: README, section Updating.
+- Update banner (`app/dashboard/_components/UpdateBanner.tsx`, rendered by the layout for the admin session): shown only when `lib/update/status.ts` finds a newer upstream release; the Update button calls `syncUpdateAction` (`app/dashboard/update/actions.ts`: `requireAdmin()` first, same-origin check, rate limit 3/min, status re-derived server-side, fork/branch/token from server env only; the one request value is the hidden `expectedSha` form field, the release commit SHA at page load, 40 lowercase hex, only compared with a fresh tag lookup by `syncFork`, which refuses with `tag_moved` (audit status 412) and no merge call on mismatch). Setup and policy: README, section Updating.
 - Fleet/model display: model names come only from heartbeat (`agent_tokens.model`); null -> "—". Never invent rows:
   identities come from data (no invented identities).
 - Accessibility: every control labelled, focus visible, contrast AA, table headers `scope`, dialogs trap focus.

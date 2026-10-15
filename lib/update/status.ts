@@ -5,7 +5,7 @@
 //   available  an update exists and sync is configured: show notes, migration count and the Update button
 
 import { getToken, resolveBranch, resolveFork, resolveUpstream, sameRepo } from "./config";
-import { fetchLatestRelease, pendingMigrationCount } from "./release";
+import { fetchLatestRelease, fetchTagCommit, pendingMigrationCount } from "./release";
 import { isNewer, parseSemver, runningVersion } from "./version";
 
 export type UpdateStatus =
@@ -19,6 +19,7 @@ export type UpdateStatus =
       notes: string;
       url: string;
       migrations: number | null;
+      sha: string | null; // the release commit this status shows (the tag's commit, cached up to 1 h); the Update form submits it and the sync refuses if the tag moved
       fork: string;
       manualSyncUrl: string;
     };
@@ -60,8 +61,10 @@ async function compute(deps: StatusDeps): Promise<UpdateStatus> {
   }
 
   // Counted on the release TAG's tree: that is the commit the sync merges, not upstream's branch head.
+  // Both lookups share the cached tag->commit entry, so the count and the sha always describe the same commit.
+  const sha = await fetchTagCommit({ tag: release.tag, fetch: deps.fetch, now: deps.now, env });
   const migrations = await pendingMigrationCount({ tag: release.tag, fetch: deps.fetch, now: deps.now, env, bundled: deps.bundledMigrations });
-  return { state: "available", latest: release.version, tag: release.tag, current, notes: release.body, url: release.url, migrations, fork, manualSyncUrl };
+  return { state: "available", latest: release.version, tag: release.tag, current, notes: release.body, url: release.url, migrations, sha, fork, manualSyncUrl };
 }
 
 export async function getUpdateStatus(deps: StatusDeps = {}): Promise<UpdateStatus> {

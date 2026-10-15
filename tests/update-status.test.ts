@@ -89,6 +89,7 @@ describe("getUpdateStatus: available", () => {
       notes: "Notes: new stuff",
       url: `https://github.com/${UP}/releases/tag/v1.2.0`,
       migrations: 1,
+      sha: TAG_SHA,
       fork: FORK,
       manualSyncUrl: `https://github.com/${FORK}/compare/main...${UP_OWNER}:v1.2.0`,
     });
@@ -124,6 +125,18 @@ describe("getUpdateStatus: available", () => {
   it("reports migrations:null (unknown) when the upstream migration list cannot be read", async () => {
     const f = fakeFetch((url) => (url.includes("/releases/latest") ? json(releaseBody()) : json({ message: "x" }, 500)));
     expect(await getUpdateStatus({ ...base, fetch: f.fn, env: ENV_OK })).toMatchObject({ state: "available", migrations: null });
+  });
+
+  it("carries the release commit the banner shows (sha), even when the migration count is unknown", async () => {
+    const s = await getUpdateStatus({ runningVersion: "1.1.0", bundledMigrations: null, fetch: happy().fn, env: ENV_OK });
+    expect(s).toMatchObject({ state: "available", migrations: null, sha: TAG_SHA });
+  });
+
+  it("reports sha:null when the release tag cannot be resolved (the banner then offers no Update button)", async () => {
+    const f = fakeFetch((url) =>
+      url.includes("/releases/latest") ? json(releaseBody()) : url.includes("/git/ref/tags/") ? json({ message: "Not Found" }, 404) : json([]),
+    );
+    expect(await getUpdateStatus({ ...base, fetch: f.fn, env: ENV_OK })).toMatchObject({ state: "available", sha: null });
   });
 
   it("reports migrations:null when the running app has no bundled migration list", async () => {
